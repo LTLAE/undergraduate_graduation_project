@@ -1,0 +1,13 @@
+[project]
+name = "traffic_light_control_python"
+version = "0.1.0"
+description = "Traffic light control YOLO part"
+requires-python = ">=3.9"
+dependencies = [
+    "opencv-python>=4.12.0.88",
+    "ultralytics>=8.3.243",
+]
+
+[tool.uv]
+# uv-specific configuration can go here later
+
