@@ -5,23 +5,37 @@ use rusqlite::Connection;
 
 const SQL_FILE_LOCATION: &str = "./sqheavy/db.sqlite";
 
-pub fn init_sqlite_db(where_is_init_dot_sql: &str) -> bool {
+pub enum SQLInitError {
+    ReadInitFileFailed(String),
+    DBConnectionFailed,
+    ExecutionFailed(rusqlite::Error),
+}
+impl std::fmt::Display for SQLInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SQLInitError::ReadInitFileFailed(path_given) => write!(f, "Failed to read init.sql file. {} exists?", path_given),
+            SQLInitError::DBConnectionFailed => write!(f, "Failed to connect to the database."),
+            SQLInitError::ExecutionFailed(e) => write!(f, "SQL execution failed: {}", e),
+        }
+    }
+}
+pub fn init_sqlite_db(where_is_init_dot_sql: &str) -> Result<(), SQLInitError> {
     // read init.sql
     let init_sql_content = match fs::read_to_string(where_is_init_dot_sql) {
         Ok(content) => content,
-        Err(_) => return false,
+        Err(_) => return Err(SQLInitError::ReadInitFileFailed(where_is_init_dot_sql.to_string())),
     };
 
-    // 创建数据库连接（如果文件不存在会自动创建）
+    // connect to db
     let conn = match Connection::open(&SQL_FILE_LOCATION) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return Err(SQLInitError::DBConnectionFailed),
     };
 
-    // 执行 SQL 初始化语句
+    // do init.sql
     match conn.execute_batch(&init_sql_content) {
-        Ok(_) => true,
-        Err(_) => false,
+        Ok(_) => Ok(()),
+        Err(e) => Err(SQLInitError::ExecutionFailed(e)),
     }
 }
 
@@ -37,28 +51,47 @@ fn disconnect(connection: Connection) -> bool {
     true
 }
 
+
+pub enum SQLInsertError {
+    InvalidTable(String),
+    EmptyFuzzyResult,
+    DBConnectionFailed,
+    ExecutionFailed(rusqlite::Error),
+}
+impl std::fmt::Display for SQLInsertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SQLInsertError::InvalidTable(wrong_table_name) => write!(f, "Invalid table name provided: {}", wrong_table_name),
+            SQLInsertError::EmptyFuzzyResult => write!(f, "Fuzzy result cannot be empty."),
+            SQLInsertError::DBConnectionFailed => write!(f, "Failed to connect to the database."),
+            SQLInsertError::ExecutionFailed(e) => write!(f, "SQL execution failed: {}", e),
+        }
+    }
+}
+
 // table: vehicle_fuzzy_results / pedestrian_fuzzy_results
 const TABLE_LIST: [&str; 2] = ["vehicle_fuzzy_results", "pedestrian_fuzzy_results"];
 // fuzzy_result: recommended but not restricted, LOW / MEDIUM / HIGH
-pub fn insert(table: &str, fuzzy_result :&str) -> bool {
-    // table and fuzzy_result must not be null
+pub fn insert(table: &str, fuzzy_result :&str) -> Result<(), SQLInsertError> {
+    // table MUST whitelist, fuzzy_result not empty
     if !TABLE_LIST.contains(&table) {
-        false;
+        return Err(SQLInsertError::InvalidTable(table.to_string()));
     }
     if fuzzy_result.is_empty() {
-        false;
+        return Err(SQLInsertError::EmptyFuzzyResult);
     }
     // connect to db
-    let conn = init_connection(SQL_FILE_LOCATION);
-    if conn.is_none() {
-        false;
+    let conn = match init_connection(SQL_FILE_LOCATION) {
+        Some(c) => c,
+        None => return Err(SQLInsertError::DBConnectionFailed),
+    };
+    // INSERT INTO table <fuzzy_result> VALUES <fuzzy_result>;
+    let sql: String = format!("INSERT INTO {} (fuzzy_result, created_at) VALUES (?1, ?2)", table);
+    let time_now: i64 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+
+    match conn.execute(&sql, rusqlite::params![fuzzy_result, time_now]) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(SQLInsertError::ExecutionFailed(e)),
     }
-
-
-
-
-
-
-
-    true
 }
+
