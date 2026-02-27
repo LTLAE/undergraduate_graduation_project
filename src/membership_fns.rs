@@ -1,3 +1,6 @@
+// This file contains definitions of membership functions and other data structures needed
+
+// membership functions
 // pedestrian low
 /*
 \begin{equation}
@@ -10,7 +13,8 @@
     \end{cases}
 \end{equation}
 */
-fn ped_low(x: f64) -> f64 {
+pub fn ped_low(x: i32) -> f64 {
+    let x = x as f64;
     if x <= 0.0 {
         0.0
     } else if x > 0.0 && x <= 30.0 {
@@ -34,7 +38,8 @@ fn ped_low(x: f64) -> f64 {
     \end{cases}
 \end{equation}
 */
-fn ped_mid(x: f64) -> f64 {
+pub fn ped_mid(x: i32) -> f64 {
+    let x = x as f64;
     if x <= 30.0 {
         0.0
     } else if x > 30.0 && x <= 50.0 {
@@ -59,7 +64,8 @@ fn ped_mid(x: f64) -> f64 {
     \end{cases}
 \end{equation}
 */
-fn ped_high(x: f64) -> f64 {
+pub fn ped_high(x: i32) -> f64 {
+    let x = x as f64;
     if x <= 100.0 {
         0.0
     } else if x > 100.0 && x <= 150.0 {
@@ -81,7 +87,8 @@ fn ped_high(x: f64) -> f64 {
     \end{cases}
 \end{equation}
 */
-fn veh_low(y: f64) -> f64 {
+pub fn veh_low(y: i32) -> f64 {
+    let y = y as f64;
     if y <= 0.0 {
         0.0
     } else if y > 0.0 && y <= 3.0 {
@@ -106,7 +113,8 @@ fn veh_low(y: f64) -> f64 {
     \end{cases}
 \end{equation}
 */
-fn veh_mid(y: f64) -> f64 {
+pub fn veh_mid(y: i32) -> f64 {
+    let y = y as f64;
     if y <= 3.0 {
         0.0
     } else if y > 3.0 && y <= 5.0 {
@@ -132,7 +140,8 @@ fn veh_mid(y: f64) -> f64 {
     \end{cases}
 \end{equation}
 */
-fn veh_high(y: f64) -> f64 {
+pub fn veh_high(y: i32) -> f64 {
+    let y = y as f64;
     if y <= 7.0 {
         0.0
     } else if y > 7.0 && y <= 10.0 {
@@ -142,28 +151,28 @@ fn veh_high(y: f64) -> f64 {
     }
 }
 
-enum FuzzyResult {
+pub enum FuzzyLabels {
     Low,
     Medium,
     High,
 }
-enum FuzzyAction{
+pub enum FuzzyAction{
     NoExtension,
     ShortExtension,
     MediumExtension,
     LongExtension,
 }
-fn knowledge_base(ped: FuzzyResult, veh: FuzzyResult) -> FuzzyAction {
+pub fn knowledge_base(ped: FuzzyLabels, veh: FuzzyLabels) -> FuzzyAction {
     match (veh, ped) {
-        (FuzzyResult::Low,    FuzzyResult::Low)    => FuzzyAction::NoExtension,
-        (FuzzyResult::Low,    FuzzyResult::Medium) => FuzzyAction::MediumExtension,
-        (FuzzyResult::Low,    FuzzyResult::High)   => FuzzyAction::LongExtension,
-        (FuzzyResult::Medium, FuzzyResult::Low)    => FuzzyAction::NoExtension,
-        (FuzzyResult::Medium, FuzzyResult::Medium) => FuzzyAction::ShortExtension,
-        (FuzzyResult::Medium, FuzzyResult::High)   => FuzzyAction::MediumExtension,
-        (FuzzyResult::High,   FuzzyResult::Low)    => FuzzyAction::NoExtension,
-        (FuzzyResult::High,   FuzzyResult::Medium) => FuzzyAction::NoExtension,
-        (FuzzyResult::High,   FuzzyResult::High)   => FuzzyAction::ShortExtension,
+        (FuzzyLabels::Low,    FuzzyLabels::Low)    => FuzzyAction::NoExtension,
+        (FuzzyLabels::Low,    FuzzyLabels::Medium) => FuzzyAction::MediumExtension,
+        (FuzzyLabels::Low,    FuzzyLabels::High)   => FuzzyAction::LongExtension,
+        (FuzzyLabels::Medium, FuzzyLabels::Low)    => FuzzyAction::NoExtension,
+        (FuzzyLabels::Medium, FuzzyLabels::Medium) => FuzzyAction::ShortExtension,
+        (FuzzyLabels::Medium, FuzzyLabels::High)   => FuzzyAction::MediumExtension,
+        (FuzzyLabels::High,   FuzzyLabels::Low)    => FuzzyAction::NoExtension,
+        (FuzzyLabels::High,   FuzzyLabels::Medium) => FuzzyAction::NoExtension,
+        (FuzzyLabels::High,   FuzzyLabels::High)   => FuzzyAction::ShortExtension,
     }
 }
 
