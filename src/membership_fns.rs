@@ -151,16 +151,28 @@ pub fn veh_high(y: i32) -> f64 {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum FuzzyLabels {
     Low,
     Medium,
     High,
 }
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum FuzzyAction{
     NoExtension,
     ShortExtension,
     MediumExtension,
     LongExtension,
+}
+impl FuzzyAction {
+    pub fn all() -> &'static [FuzzyAction] {
+        &[
+            FuzzyAction::NoExtension,
+            FuzzyAction::ShortExtension,
+            FuzzyAction::MediumExtension,
+            FuzzyAction::LongExtension,
+        ]
+    }
 }
 pub fn knowledge_base(ped: FuzzyLabels, veh: FuzzyLabels) -> FuzzyAction {
     match (veh, ped) {
