@@ -3,6 +3,7 @@
 // Exact pedestrian or vehicle count -> list of membership degrees
 use std::collections::HashMap;
 use crate::membership_fns::{FuzzyAction, FuzzyLabels};
+use crate::config::{T_MIN, T_MAX, STEP};
 fn get_element_membership_degree(   // 3.3.1
     exact_value: i32,
     membership_fn_list: Vec<(FuzzyLabels, fn(i32) -> f64)>
@@ -49,4 +50,28 @@ fn get_operation_membership_degree(     // 3.3.3
     /*return*/operation_mb_degrees
 }
 // result would be like: {FuzzyAction::NoExtension: 0.8, FuzzyAction::MediumExtension: 0.2, ...}
+
+// Centroid defuzzification, aka 3.4
+// t range: [0.0, 60.0], step: 0.1
+fn defuzzify(operation_membership_degrees: HashMap<FuzzyAction, f64>) -> f64 {
+    let mut numerator :f64 = 0.0;  // Σ μ(t) * t
+    let mut denominator :f64 = 0.0;  // Σ μ(t)
+
+    // T_MIN, T_MAX, STEP are defined in config.rs
+    let mut t = T_MIN;
+    while t <= T_MAX {
+        // For each t, take the max of all clipped membership values (union of all actions)
+        let mu_t = operation_membership_degrees
+            .iter()
+            .map(|(&action, &alpha)| action.ext_fn()(t, alpha))  // cut with alpha
+            .fold(0.0_f64, f64::max);                            // union = max
+
+        numerator   += mu_t * t;
+        denominator += mu_t;
+        t += STEP;
+    }
+
+    if denominator == 0.0 { 0.0 } else { numerator / denominator }
+}
+// result: final green extension time in f64
 

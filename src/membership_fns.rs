@@ -151,6 +151,20 @@ pub fn veh_high(y: i32) -> f64 {
     }
 }
 
+pub fn knowledge_base(ped: FuzzyLabels, veh: FuzzyLabels) -> FuzzyAction {
+    match (veh, ped) {
+        (FuzzyLabels::Low,    FuzzyLabels::Low)    => FuzzyAction::NoExtension,
+        (FuzzyLabels::Low,    FuzzyLabels::Medium) => FuzzyAction::MediumExtension,
+        (FuzzyLabels::Low,    FuzzyLabels::High)   => FuzzyAction::LongExtension,
+        (FuzzyLabels::Medium, FuzzyLabels::Low)    => FuzzyAction::NoExtension,
+        (FuzzyLabels::Medium, FuzzyLabels::Medium) => FuzzyAction::ShortExtension,
+        (FuzzyLabels::Medium, FuzzyLabels::High)   => FuzzyAction::MediumExtension,
+        (FuzzyLabels::High,   FuzzyLabels::Low)    => FuzzyAction::NoExtension,
+        (FuzzyLabels::High,   FuzzyLabels::Medium) => FuzzyAction::NoExtension,
+        (FuzzyLabels::High,   FuzzyLabels::High)   => FuzzyAction::ShortExtension,
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum FuzzyLabels {
     Low,
@@ -173,18 +187,75 @@ impl FuzzyAction {
             FuzzyAction::LongExtension,
         ]
     }
-}
-pub fn knowledge_base(ped: FuzzyLabels, veh: FuzzyLabels) -> FuzzyAction {
-    match (veh, ped) {
-        (FuzzyLabels::Low,    FuzzyLabels::Low)    => FuzzyAction::NoExtension,
-        (FuzzyLabels::Low,    FuzzyLabels::Medium) => FuzzyAction::MediumExtension,
-        (FuzzyLabels::Low,    FuzzyLabels::High)   => FuzzyAction::LongExtension,
-        (FuzzyLabels::Medium, FuzzyLabels::Low)    => FuzzyAction::NoExtension,
-        (FuzzyLabels::Medium, FuzzyLabels::Medium) => FuzzyAction::ShortExtension,
-        (FuzzyLabels::Medium, FuzzyLabels::High)   => FuzzyAction::MediumExtension,
-        (FuzzyLabels::High,   FuzzyLabels::Low)    => FuzzyAction::NoExtension,
-        (FuzzyLabels::High,   FuzzyLabels::Medium) => FuzzyAction::NoExtension,
-        (FuzzyLabels::High,   FuzzyLabels::High)   => FuzzyAction::ShortExtension,
+
+    // FuzzyAction -- corresponding membership function
+    pub fn ext_fn(self) -> fn(f64, f64) -> f64 {
+        match self {
+            FuzzyAction::NoExtension     => ext_none,
+            FuzzyAction::ShortExtension  => ext_short,
+            FuzzyAction::MediumExtension => ext_medium,
+            FuzzyAction::LongExtension   => ext_long,
+        }
     }
+}
+
+// Time extension membership functions
+// alpha_cut in these functions could cut the membership in following operations
+// no extension  eq.(7)
+pub fn ext_none(t: f64, alpha_cut: f64) -> f64 {
+    let mu = if t <= 0.0 {
+        1.0
+    } else if t > 0.0 && t < 10.0 {
+        (10.0 - t) / (10.0 - 0.0)
+    } else {
+        0.0
+    };
+    mu.min(alpha_cut)
+}
+
+// short extension  eq.(8)
+pub fn ext_short(t: f64, alpha_cut: f64) -> f64 {
+    let mu = if t <= 0.0 {
+        0.0
+    } else if t > 0.0 && t <= 10.0 {
+        (t - 0.0) / (10.0 - 0.0)
+    } else if t > 10.0 && t <= 20.0 {
+        1.0
+    } else if t > 20.0 && t < 30.0 {
+        (30.0 - t) / (30.0 - 20.0)
+    } else {
+        0.0
+    };
+    mu.min(alpha_cut)
+}
+
+// medium extension  eq.(9)
+pub fn ext_medium(t: f64, alpha_cut: f64) -> f64 {
+    let mu = if t <= 10.0 {
+        0.0
+    } else if t > 10.0 && t <= 20.0 {
+        (t - 10.0) / (20.0 - 10.0)
+    } else if t > 20.0 && t <= 40.0 {
+        1.0
+    } else if t > 40.0 && t < 50.0 {
+        (50.0 - t) / (50.0 - 40.0)
+    } else {
+        0.0
+    };
+    mu.min(alpha_cut)
+}
+
+// long extension  eq.(10)
+pub fn ext_long(t: f64, alpha_cut: f64) -> f64 {
+    let mu = if t <= 20.0 {
+        0.0
+    } else if t > 20.0 && t <= 40.0 {
+        (t - 20.0) / (40.0 - 20.0)
+    } else if t > 40.0 && t <= 60.0 {
+        1.0
+    } else {
+        0.0
+    };
+    mu.min(alpha_cut)
 }
 
