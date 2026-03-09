@@ -75,3 +75,27 @@ fn defuzzify(operation_membership_degrees: HashMap<FuzzyAction, f64>) -> f64 {
 }
 // result: final green extension time in f64
 
+/// Public entry point: i32 ped count + i32 veh count -> f64 extend time
+pub fn run_fuzzy_inference(ped_count: i32, veh_count: i32) -> f64 {
+    use crate::membership_fns::{ped_low, ped_mid, ped_high, veh_low, veh_mid, veh_high, knowledge_base};
+
+    let ped_degrees = get_element_membership_degree(
+        ped_count,
+        vec![
+            (FuzzyLabels::Low,    ped_low  as fn(i32) -> f64),
+            (FuzzyLabels::Medium, ped_mid  as fn(i32) -> f64),
+            (FuzzyLabels::High,   ped_high as fn(i32) -> f64),
+        ],
+    );
+    let veh_degrees = get_element_membership_degree(
+        veh_count,
+        vec![
+            (FuzzyLabels::Low,    veh_low  as fn(i32) -> f64),
+            (FuzzyLabels::Medium, veh_mid  as fn(i32) -> f64),
+            (FuzzyLabels::High,   veh_high as fn(i32) -> f64),
+        ],
+    );
+    let rule_degrees = get_rule_membership_degree(knowledge_base, ped_degrees, veh_degrees);
+    let op_degrees   = get_operation_membership_degree(rule_degrees);
+    defuzzify(op_degrees)
+}
