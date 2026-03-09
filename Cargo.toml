@@ -8,3 +8,6 @@ pyo3 = { version = "0.21", features = ["auto-initialize"] }
 # Remember to set python -> /python/.venv/bin/python, we are using python 3.9 now.
 rusqlite = { version = "0.38", features = ["bundled"] }
 once_cell = "1.17"
+eframe = "0.31"
+egui = "0.31"
+rand = "0.9"
