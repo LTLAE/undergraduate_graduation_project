@@ -1,21 +1,21 @@
 use crate::config;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 // Debug for printing, PartialEq for using == in set_sig() to avoid ped yellow light
-enum TrafficSign {
-    RED,
-    YELLOW,
-    GREEN,
+pub enum TrafficSign {
+    Red,
+    Yellow,
+    Green,
 }
 
-#[derive(Debug)]
-enum LightState {
-    OFF,
-    SOLID,
-    BLINKING,
+#[derive(Debug, Clone)]
+pub enum LightState {
+    Off,
+    Solid,
+    Blinking,
 }
 
-struct TrafficLight {
+pub struct TrafficLight {
     pub sig_ped: (TrafficSign, LightState),
     pub sig_veh: (TrafficSign, LightState),
     pub time: f64,
@@ -27,7 +27,7 @@ impl TrafficLight {
         match sig_pos {
             "ped" => {
                 // since ped have no yellow light, raise error when trying to do so
-                if next_sign == TrafficSign::YELLOW {
+                if next_sign == TrafficSign::Yellow {
                     panic!("Pedestrian signal cannot be yellow");
                 }
                 self.sig_ped.0 = next_sign
@@ -58,31 +58,31 @@ impl TrafficLight {
     // workflow of ped -> red, veh -> green
     pub fn ped_to_red_veh_to_green(&mut self) {
         // ped go red
-        self.sig_ped = (TrafficSign::RED, LightState::SOLID);
+        self.sig_ped = (TrafficSign::Red, LightState::Solid);
         self.display();
         // wait <ALL_RED> seconds of all red
         self.time = config::ALL_RED;
         self.thread_wait();
         // veh go green
-        self.sig_veh = (TrafficSign::GREEN, LightState::SOLID);
+        self.sig_veh = (TrafficSign::Green, LightState::Solid);
         self.display();
     }
 
     // workflow of veh -> red, ped -> green
     pub fn veh_to_red_ped_to_green(&mut self) {
         // veh go yellow for <VEH_YELLOW> seconds
-        self.sig_veh = (TrafficSign::YELLOW, LightState::SOLID);
+        self.sig_veh = (TrafficSign::Yellow, LightState::Solid);
         self.display();
         self.time = config::VEH_YELLOW;
         self.thread_wait();
         // veh go red
-        self.sig_veh = (TrafficSign::RED, LightState::SOLID);
+        self.sig_veh = (TrafficSign::Red, LightState::Solid);
         self.display();
         // wait <ALL_RED> seconds of all red
         self.time = config::ALL_RED;
         self.thread_wait();
         // ped go green
-        self.sig_ped = (TrafficSign::GREEN, LightState::SOLID);
+        self.sig_ped = (TrafficSign::Green, LightState::Solid);
         self.display();
     }
 }
