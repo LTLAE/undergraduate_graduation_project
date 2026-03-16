@@ -15,4 +15,4 @@ pub const VEH_YELLOW: f64 = 3.0;
 pub const ALL_RED: f64 = 3.0;
 
 // Weight of Extend Time and Historical avg Extend Time from DB
-pub const WEIGHT_EXTEND_TIME: f64 = 0.6;    // 0.6 current 0.4 historical
+pub const CURRENT_EXTEND_TIME_WEIGHT: f64 = 0.6;    // 0.6 current 0.4 historical
