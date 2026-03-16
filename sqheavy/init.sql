@@ -5,13 +5,13 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS vehicle_fuzzy_results (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp    INTEGER NOT NULL,
-  fuzzy_result INTEGER    NOT NULL
+  obj_count INTEGER    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS pedestrian_fuzzy_results (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp    INTEGER NOT NULL,
-  fuzzy_result INTEGER    NOT NULL
+  obj_count INTEGER    NOT NULL
 );
 
 -- index by timestamp... as usual
