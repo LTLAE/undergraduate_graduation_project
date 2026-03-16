@@ -10,6 +10,8 @@ use rand::Rng;
 use crate::config;
 use crate::traffic_light::{TrafficSign, TrafficLight, LightState};
 use crate::fuzzy_inference::{get_extension_time};
+use crate::call_py_yolo::{count_people, count_cars};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Shared simulation state
@@ -381,6 +383,11 @@ struct TrafficLightApp {
     fuzzy_ped_result: Option<f64>,
     /// Error message from bad input
     ped_err: Option<String>,
+    /// Selected image paths for YOLO detection
+    ped_img_path: Option<String>,
+    veh_img_path: Option<String>,
+    /// Latest YOLO detection status
+    yolo_msg: Option<String>,
 }
 
 impl TrafficLightApp {
@@ -396,6 +403,9 @@ impl TrafficLightApp {
             ui_veh_text: String::new(),
             fuzzy_ped_result: None,
             ped_err: None,
+            ped_img_path: None,
+            veh_img_path: None,
+            yolo_msg: None,
         }
     }
 }
@@ -419,12 +429,12 @@ impl eframe::App for TrafficLightApp {
             .frame(
                 egui::Frame::default()
                     .fill(Color32::from_rgb(16, 16, 22))
-                    .inner_margin(egui::Margin::same(20)),
+                    .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
                 ui.visuals_mut().override_text_color = Some(Color32::WHITE);
 
-                // ── Title ────────────────────────────────────────────────────
+                // ── Header ───────────────────────────────────────────────────
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("🚦 Traffic Light Control System Simulation")
@@ -432,18 +442,14 @@ impl eframe::App for TrafficLightApp {
                             .color(Color32::WHITE)
                             .strong(),
                     );
-                });
-                ui.add_space(8.0);
-
-                // ── Phase banner ─────────────────────────────────────────────
-                let phase_color = match snap.phase {
-                    Phase::PedestrianGreen        => Color32::from_rgb(60, 210, 80),
-                    Phase::VehicleGreen           => Color32::from_rgb(60, 180, 255),
-                    Phase::VehicleYellow          => Color32::from_rgb(230, 190, 20),
-                    Phase::AllRedBeforeVehicle
-                    | Phase::AllRedBeforePedestrian => Color32::from_rgb(210, 70, 70),
-                };
-                ui.vertical_centered(|ui| {
+                    let phase_color = match snap.phase {
+                        Phase::PedestrianGreen        => Color32::from_rgb(60, 210, 80),
+                        Phase::VehicleGreen           => Color32::from_rgb(60, 180, 255),
+                        Phase::VehicleYellow          => Color32::from_rgb(230, 190, 20),
+                        Phase::AllRedBeforeVehicle
+                        | Phase::AllRedBeforePedestrian => Color32::from_rgb(210, 70, 70),
+                    };
+                    ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(snap.phase.label())
                             .size(17.0)
@@ -451,194 +457,287 @@ impl eframe::App for TrafficLightApp {
                             .strong(),
                     );
                 });
-                ui.add_space(14.0);
-
-                // ── Lights + Info ─────────────────────────────────────────────
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-
-                    // Vehicle column
-                    ui.vertical(|ui| {
-                        ui.set_min_width(60.0);
-                        draw_vehicle_light(ui, &snap);
-                    });
-
-                    ui.add_space(16.0);
-
-                    // Pedestrian column
-                    ui.vertical(|ui| {
-                        ui.set_min_width(120.0);
-                        draw_pedestrian_light(ui, &snap);
-                    });
-
-                    ui.add_space(16.0);
-
-                    // Info panel
-                    ui.vertical(|ui| {
-                        ui.set_min_width(210.0);
-                        egui::Frame::default()
-                            .fill(Color32::from_rgb(26, 26, 36))
-                            .corner_radius(egui::CornerRadius::same(10))
-                            .inner_margin(egui::Margin::same(14))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(55, 55, 80)))
-                            .show(ui, |ui| {
-                                ui.set_min_width(210.0);
-                                ui.label(
-                                    egui::RichText::new("📊 Runtime Info")
-                                        .size(14.0)
-                                        .color(Color32::LIGHT_GRAY)
-                                        .strong(),
-                                );
-                                ui.separator();
-                                ui.add_space(4.0);
-
-                                info_row(ui, "Completed Cycles", &snap.cycle_count.to_string(), Color32::WHITE);
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Fuzzy Extension").size(12.0).color(Color32::from_rgb(150,150,180)));
-                                info_row(ui, "  Pedestrian Ext.", &format!("{:.1} s", snap.ped_extension), Color32::from_rgb(80, 210, 100));
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("TrafficLight State").size(12.0).color(Color32::from_rgb(150,150,180)));
-                                info_row(ui, "  Ped Signal", &format!("{:?}/{:?}", self.traffic_light.sig_ped.0, self.traffic_light.sig_ped.1), Color32::from_rgb(80, 210, 100));
-                                info_row(ui, "  Veh Signal", &format!("{:?}/{:?}", self.traffic_light.sig_veh.0, self.traffic_light.sig_veh.1), Color32::from_rgb(80, 170, 255));
-                                info_row(ui, "  Time",       &format!("{:.1} s", self.traffic_light.time), Color32::LIGHT_GRAY);
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Timing Parameters").size(12.0).color(Color32::from_rgb(150,150,180)));
-                                info_row(ui, "  Ped. Green", &format!("{} s", config::PHASE_BASIC_PED_GREEN as u32), Color32::LIGHT_GRAY);
-                                info_row(ui, "  Veh. Green", &format!("{} s", config::PHASE_BASIC_VEH_GREEN as u32), Color32::LIGHT_GRAY);
-                                info_row(ui, "  Ped. Blink", &format!("{} s", config::PED_GREEN_BLINKING as u32), Color32::LIGHT_GRAY);
-                                info_row(ui, "  Veh. Blink", &format!("{} s", config::VEH_GREEN_BLINKING as u32), Color32::LIGHT_GRAY);
-                                info_row(ui, "  Veh. Yellow", &format!("{} s", config::VEH_YELLOW as u32), Color32::LIGHT_GRAY);
-                                info_row(ui, "  All Red", &format!("{} s", config::ALL_RED as u32), Color32::LIGHT_GRAY);
-                            });
-                    });
-                }); // end horizontal
-                }); // end ScrollArea
-
-                ui.add_space(18.0);
-                ui.separator();
                 ui.add_space(10.0);
 
-                // ── Fuzzy Input Panel ─────────────────────────────────────────
-                egui::Frame::default()
-                    .fill(Color32::from_rgb(22, 22, 34))
-                    .corner_radius(egui::CornerRadius::same(10))
-                    .inner_margin(egui::Margin::same(14))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(55, 55, 90)))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("🧮 Manual Fuzzy Inference Input")
-                                    .size(14.0)
-                                    .color(Color32::LIGHT_GRAY)
-                                    .strong(),
-                            );
-                            ui.add_space(16.0);
-                            // Phase countdown
-                            let cd_text = format!("⏱ {:.1}s", snap.countdown.max(0.0));
-                            ui.label(egui::RichText::new(cd_text).size(22.0).color(Color32::WHITE).strong());
-                            // Blinking indicator
-                            if snap.veh_blinking {
-                                ui.label(egui::RichText::new("🟢 Veh Blinking").size(12.0).color(Color32::YELLOW));
-                            } else if snap.ped_blinking {
-                                ui.label(egui::RichText::new("🟢 Ped Blinking").size(12.0).color(Color32::YELLOW));
-                            }
-                        });
-                        ui.label(
-                            egui::RichText::new(
-                                "Enter pedestrian and vehicle counts to compute the fuzzy pedestrian green-time extension.\n\
-                                 Vehicle green time is fixed. Only the pedestrian phase will be extended.",
-                            )
-                            .size(11.0)
-                            .color(Color32::DARK_GRAY),
-                        );
-                        ui.add_space(8.0);
+                // ── Main content: horizontal-first layout ───────────────────
+                egui::ScrollArea::both().id_salt("main_content_scroll").show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        // Left side: lights + runtime info
+                        ui.vertical(|ui| {
 
-                        ui.horizontal(|ui| {
-                            // ── Pedestrian count ──────────────────────────
-                            ui.vertical(|ui| {
-                                ui.set_min_width(160.0);
-                                ui.label(egui::RichText::new("🚶 Pedestrian Count").size(13.0).color(Color32::from_rgb(80, 210, 100)));
-                                let ped_edit = egui::TextEdit::singleline(&mut self.ui_ped_text)
-                                    .hint_text("e.g. 50")
-                                    .desired_width(120.0);
-                                ui.add(ped_edit);
-                                if let Some(ref err) = self.ped_err {
-                                    ui.label(egui::RichText::new(err).size(11.0).color(Color32::from_rgb(230, 80, 80)));
-                                }
-                                if let Some(result) = self.fuzzy_ped_result {
+                            egui::Frame::default()
+                                .fill(Color32::from_rgb(22, 22, 34))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::same(12))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(55, 55, 80)))
+                                .show(ui, |ui| {
                                     ui.label(
-                                        egui::RichText::new(format!("→ Extension: {:.1} s", result))
-                                            .size(13.0)
-                                            .color(Color32::from_rgb(80, 210, 100))
+                                        egui::RichText::new("🚥 Signals & Runtime")
+                                            .size(14.0)
+                                            .color(Color32::LIGHT_GRAY)
                                             .strong(),
                                     );
-                                    // Show if queued for next phase
-                                    let queued = self.state.lock().unwrap().manual_ped_ext.is_some();
-                                    if queued {
-                                        ui.label(egui::RichText::new("⏳ Will apply in next Ped. phase").size(11.0).color(Color32::YELLOW));
-                                    }
-                                }
-                            });
+                                    ui.add_space(8.0);
 
-                            ui.add_space(24.0);
+                                    ui.horizontal_top(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.set_min_width(70.0);
+                                            draw_vehicle_light(ui, &snap);
+                                        });
 
-                            // ── Vehicle count (fuzzy input only) ──────────
-                            ui.vertical(|ui| {
-                                ui.set_min_width(160.0);
-                                ui.label(egui::RichText::new("🚗 Vehicle Count (input only)").size(13.0).color(Color32::from_rgb(80, 170, 255)));
-                                let veh_edit = egui::TextEdit::singleline(&mut self.ui_veh_text)
-                                    .hint_text("e.g. 8")
-                                    .desired_width(120.0);
-                                ui.add(veh_edit);
-                                ui.label(egui::RichText::new("Vehicle green time is fixed").size(11.0).color(Color32::DARK_GRAY));
-                            });
+                                        ui.add_space(16.0);
 
-                            ui.add_space(24.0);
+                                        ui.vertical(|ui| {
+                                            ui.set_min_width(125.0);
+                                            draw_pedestrian_light(ui, &snap);
+                                        });
 
-                            // ── Compute button ────────────────────────────
-                            ui.vertical(|ui| {
-                                ui.add_space(18.0);
-                                let btn = egui::Button::new(
-                                    egui::RichText::new("⚡ Compute & Queue").size(14.0).color(Color32::WHITE),
-                                )
-                                .fill(Color32::from_rgb(70, 100, 200))
-                                .min_size(Vec2::new(140.0, 36.0));
+                                        ui.add_space(16.0);
 
-                                if ui.add(btn).clicked() {
-                                    match self.ui_ped_text.trim().parse::<i32>() {
-                                        Ok(ped_count) if ped_count >= 0 => {
-                                            let veh_count = self.ui_veh_text.trim().parse::<i32>().unwrap_or(0).max(0);
-                                            let ext = get_extension_time(ped_count, veh_count);
-                                            self.fuzzy_ped_result = Some(ext);
-                                            self.ped_err = None;
-                                            self.state.lock().unwrap().manual_ped_ext = Some(ext);
+                                        ui.vertical(|ui| {
+                                            ui.set_min_width(200.0);
+                                            ui.set_max_width(350.0);
+                                            egui::Frame::default()
+                                                .fill(Color32::from_rgb(26, 26, 36))
+                                                .corner_radius(egui::CornerRadius::same(10))
+                                                .inner_margin(egui::Margin::same(12))
+                                                .stroke(Stroke::new(1.0, Color32::from_rgb(55, 55, 80)))
+                                                .show(ui, |ui| {
+                                                    ui.set_min_width(220.0);
+                                                    ui.label(
+                                                        egui::RichText::new("📊 Runtime Info")
+                                                            .size(14.0)
+                                                            .color(Color32::LIGHT_GRAY)
+                                                            .strong(),
+                                                    );
+                                                    ui.separator();
+                                                    ui.add_space(4.0);
+
+                                                    info_row(ui, "Completed Cycles", &snap.cycle_count.to_string(), Color32::WHITE);
+                                                    ui.add_space(4.0);
+                                                    ui.label(egui::RichText::new("Fuzzy Extension").size(12.0).color(Color32::from_rgb(150,150,180)));
+                                                    info_row(ui, "  Pedestrian Ext.", &format!("{:.1} s", snap.ped_extension), Color32::from_rgb(80, 210, 100));
+                                                    ui.add_space(4.0);
+                                                    ui.label(egui::RichText::new("TrafficLight State").size(12.0).color(Color32::from_rgb(150,150,180)));
+                                                    info_row(ui, "  Ped Signal", &format!("{:?}/{:?}", self.traffic_light.sig_ped.0, self.traffic_light.sig_ped.1), Color32::from_rgb(80, 210, 100));
+                                                    info_row(ui, "  Veh Signal", &format!("{:?}/{:?}", self.traffic_light.sig_veh.0, self.traffic_light.sig_veh.1), Color32::from_rgb(80, 170, 255));
+                                                    info_row(ui, "  Time", &format!("{:.1} s", self.traffic_light.time), Color32::LIGHT_GRAY);
+                                                    ui.add_space(4.0);
+                                                    ui.label(egui::RichText::new("Timing Parameters").size(12.0).color(Color32::from_rgb(150,150,180)));
+                                                    info_row(ui, "  Ped. Green", &format!("{} s", config::PHASE_BASIC_PED_GREEN as u32), Color32::LIGHT_GRAY);
+                                                    info_row(ui, "  Veh. Green", &format!("{} s", config::PHASE_BASIC_VEH_GREEN as u32), Color32::LIGHT_GRAY);
+                                                    info_row(ui, "  Ped. Blink", &format!("{} s", config::PED_GREEN_BLINKING as u32), Color32::LIGHT_GRAY);
+                                                    info_row(ui, "  Veh. Blink", &format!("{} s", config::VEH_GREEN_BLINKING as u32), Color32::LIGHT_GRAY);
+                                                    info_row(ui, "  Veh. Yellow", &format!("{} s", config::VEH_YELLOW as u32), Color32::LIGHT_GRAY);
+                                                    info_row(ui, "  All Red", &format!("{} s", config::ALL_RED as u32), Color32::LIGHT_GRAY);
+                                                });
+                                        });
+                                    });
+                                });
+                        });
+
+                        ui.add_space(12.0);
+
+                        // Right side: fuzzy + YOLO stacked
+                        ui.vertical(|ui| {
+                            ui.set_min_width(460.0);
+
+                            egui::Frame::default()
+                                .fill(Color32::from_rgb(22, 22, 34))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::same(12))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(55, 55, 90)))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("🧮 Manual Fuzzy Inference Input")
+                                                .size(14.0)
+                                                .color(Color32::LIGHT_GRAY)
+                                                .strong(),
+                                        );
+                                        ui.add_space(12.0);
+                                        let cd_text = format!("⏱ {:.1}s", snap.countdown.max(0.0));
+                                        ui.label(egui::RichText::new(cd_text).size(20.0).color(Color32::WHITE).strong());
+                                        if snap.veh_blinking {
+                                            ui.label(egui::RichText::new("🟢 Veh Blinking").size(12.0).color(Color32::YELLOW));
+                                        } else if snap.ped_blinking {
+                                            ui.label(egui::RichText::new("🟢 Ped Blinking").size(12.0).color(Color32::YELLOW));
                                         }
-                                        _ => {
-                                            self.ped_err = Some("Invalid count (use ≥0)".to_string());
-                                            self.fuzzy_ped_result = None;
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Enter pedestrian and vehicle counts to compute the pedestrian green extension. Vehicle green remains fixed.",
+                                        )
+                                        .size(11.0)
+                                        .color(Color32::DARK_GRAY),
+                                    );
+                                    ui.add_space(8.0);
+
+                                    ui.horizontal_top(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.set_min_width(150.0);
+                                            ui.label(egui::RichText::new("🚶 Pedestrian Count").size(13.0).color(Color32::from_rgb(80, 210, 100)));
+                                            let ped_edit = egui::TextEdit::singleline(&mut self.ui_ped_text)
+                                                .hint_text("e.g. 50")
+                                                .desired_width(120.0);
+                                            ui.add(ped_edit);
+                                            if let Some(ref err) = self.ped_err {
+                                                ui.label(egui::RichText::new(err).size(11.0).color(Color32::from_rgb(230, 80, 80)));
+                                            }
+                                            if let Some(result) = self.fuzzy_ped_result {
+                                                ui.label(
+                                                    egui::RichText::new(format!("→ Extension: {:.1} s", result))
+                                                        .size(13.0)
+                                                        .color(Color32::from_rgb(80, 210, 100))
+                                                        .strong(),
+                                                );
+                                                let queued = self.state.lock().unwrap().manual_ped_ext.is_some();
+                                                if queued {
+                                                    ui.label(egui::RichText::new("⏳ Will apply in next Ped. phase").size(11.0).color(Color32::YELLOW));
+                                                }
+                                            }
+                                        });
+
+                                        ui.add_space(20.0);
+
+                                        ui.vertical(|ui| {
+                                            ui.set_min_width(160.0);
+                                            ui.label(egui::RichText::new("🚗 Vehicle Count (input only)").size(13.0).color(Color32::from_rgb(80, 170, 255)));
+                                            let veh_edit = egui::TextEdit::singleline(&mut self.ui_veh_text)
+                                                .hint_text("e.g. 8")
+                                                .desired_width(120.0);
+                                            ui.add(veh_edit);
+                                            ui.label(egui::RichText::new("Vehicle green time is fixed").size(11.0).color(Color32::DARK_GRAY));
+                                        });
+
+                                        ui.add_space(20.0);
+
+                                        ui.vertical(|ui| {
+                                            ui.add_space(18.0);
+                                            let btn = egui::Button::new(
+                                                egui::RichText::new("⚡ Compute & Queue").size(14.0).color(Color32::WHITE),
+                                            )
+                                            .fill(Color32::from_rgb(70, 100, 200))
+                                            .min_size(Vec2::new(145.0, 36.0));
+
+                                            if ui.add(btn).clicked() {
+                                                match self.ui_ped_text.trim().parse::<i32>() {
+                                                    Ok(ped_count) if ped_count >= 0 => {
+                                                        let veh_count = self.ui_veh_text.trim().parse::<i32>().unwrap_or(0).max(0);
+                                                        let ext = get_extension_time(ped_count, veh_count);
+                                                        self.fuzzy_ped_result = Some(ext);
+                                                        self.ped_err = None;
+                                                        self.state.lock().unwrap().manual_ped_ext = Some(ext);
+                                                    }
+                                                    _ => {
+                                                        self.ped_err = Some("Invalid count (use ≥0)".to_string());
+                                                        self.fuzzy_ped_result = None;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
+                                });
+
+                            ui.add_space(10.0);
+
+                            egui::Frame::default()
+                                .fill(Color32::from_rgb(20, 24, 32))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::same(12))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(55, 55, 90)))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("🖼️ Image Inputs & YOLO Detection")
+                                            .size(14.0).color(Color32::LIGHT_GRAY).strong());
+                                        if let Some(msg) = &self.yolo_msg {
+                                            ui.add_space(12.0);
+                                            ui.label(egui::RichText::new(msg).size(12.0).color(Color32::from_rgb(180, 200, 255)));
                                         }
-                                    }
-                                }
-                            });
+                                    });
+                                    ui.add_space(8.0);
+
+                                    ui.horizontal_top(|ui| {
+                                        ui.vertical(|ui| {
+                                            let select_btn = egui::Button::new("📁 Select pedestrian image").min_size(Vec2::new(180.0, 32.0));
+                                            if ui.add(select_btn).clicked() {
+                                                if let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "webp"]).pick_file() {
+                                                    self.ped_img_path = Some(path.display().to_string());
+                                                    self.yolo_msg = Some(format!("Ped image selected: {}", Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("unknown")));
+                                                }
+                                            }
+                                            let detect_btn = egui::Button::new("🔎 YOLO detect pedestrians").min_size(Vec2::new(180.0, 32.0));
+                                            if ui.add(detect_btn).clicked() {
+                                                match self.ped_img_path.clone() {
+                                                    Some(p) => match count_people(&p) {
+                                                        Ok(cnt) => {
+                                                            self.ui_ped_text = cnt.to_string();
+                                                            self.yolo_msg = Some(format!("Pedestrians detected: {}", cnt));
+                                                            self.ped_err = None;
+                                                        }
+                                                        Err(e) => {
+                                                            self.yolo_msg = Some(format!("Pedestrian detection failed: {}", e));
+                                                        }
+                                                    },
+                                                    None => {
+                                                        self.yolo_msg = Some("Select a pedestrian image first".to_string());
+                                                    }
+                                                }
+                                            }
+                                            if let Some(path) = &self.ped_img_path {
+                                                ui.label(egui::RichText::new(Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path)).size(11.0).color(Color32::DARK_GRAY));
+                                            }
+                                        });
+
+                                        ui.add_space(24.0);
+
+                                        ui.vertical(|ui| {
+                                            let select_btn = egui::Button::new("📁 Select vehicle image").min_size(Vec2::new(180.0, 32.0));
+                                            if ui.add(select_btn).clicked() {
+                                                if let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "webp"]).pick_file() {
+                                                    self.veh_img_path = Some(path.display().to_string());
+                                                    self.yolo_msg = Some(format!("Vehicle image selected: {}", Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("unknown")));
+                                                }
+                                            }
+                                            let detect_btn = egui::Button::new("🔎 YOLO detect vehicles").min_size(Vec2::new(180.0, 32.0));
+                                            if ui.add(detect_btn).clicked() {
+                                                match self.veh_img_path.clone() {
+                                                    Some(p) => match count_cars(&p) {
+                                                        Ok(cnt) => {
+                                                            self.ui_veh_text = cnt.to_string();
+                                                            self.yolo_msg = Some(format!("Vehicles detected: {}", cnt));
+                                                        }
+                                                        Err(e) => {
+                                                            self.yolo_msg = Some(format!("Vehicle detection failed: {}", e));
+                                                        }
+                                                    },
+                                                    None => {
+                                                        self.yolo_msg = Some("Select a vehicle image first".to_string());
+                                                    }
+                                                }
+                                            }
+                                            if let Some(path) = &self.veh_img_path {
+                                                ui.label(egui::RichText::new(Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path)).size(11.0).color(Color32::DARK_GRAY));
+                                            }
+                                        });
+                                    });
+                                });
                         });
                     });
+                });
 
                 ui.add_space(10.0);
                 ui.separator();
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
-                // ── Controls ──────────────────────────────────────────────────
+                // ── Bottom controls ─────────────────────────────────────────
                 ui.horizontal(|ui| {
-                    ui.add_space(20.0);
-
-                    // Speed
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("⚡ Speed").size(13.0).color(Color32::LIGHT_GRAY));
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             for &spd in &[0.5_f64, 1.0, 2.0, 4.0] {
-                                let label   = if spd == 0.5 { "0.5×".to_string() } else { format!("{}×", spd as u32) };
+                                let label = if spd == 0.5 { "0.5×".to_string() } else { format!("{}×", spd as u32) };
                                 let selected = {
                                     let s = self.state.lock().unwrap();
                                     (s.speed - spd).abs() < 0.01
@@ -660,9 +759,8 @@ impl eframe::App for TrafficLightApp {
                         });
                     });
 
-                    ui.add_space(32.0);
+                    ui.add_space(28.0);
 
-                    // Pause / Resume + Skip Phase (same vertical column)
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("▶ Control").size(13.0).color(Color32::LIGHT_GRAY));
                         ui.add_space(4.0);
@@ -694,18 +792,17 @@ impl eframe::App for TrafficLightApp {
                                 if ui.add(skip_btn).clicked() {
                                     let mut s = self.state.lock().unwrap();
                                     s.skip_phase = true;
-                                    s.paused     = false;
+                                    s.paused = false;
                                 }
                             }
                         });
                     });
                 });
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(4.0);
 
-                // ── Footer ────────────────────────────────────────────────────
                 ui.label(
                     egui::RichText::new(
                         "UI mostly by Claude Sonnet 4.6, logic by Longtail Amethyst Eralbrunia and Demitail Amethyst Eralbrunia",
@@ -732,7 +829,8 @@ pub fn run() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Traffic Light Control System Simulation")
-            .with_inner_size([600.0, 800.0])
+            .with_inner_size([1280.0, 650.0])
+            .with_min_inner_size([1280.0, 650.0])
             .with_resizable(true),
         ..Default::default()
     };
