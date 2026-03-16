@@ -16,8 +16,8 @@ pub enum LightState {
 }
 
 pub struct TrafficLight {
-    pub sig_ped: (TrafficSign, LightState),
-    pub sig_veh: (TrafficSign, LightState),
+    pub sig_ped: (TrafficSign::Red, LightState::Solid),
+    pub sig_veh: (TrafficSign::Red, LightState::Solid),
     pub time: f64,
 }
 
