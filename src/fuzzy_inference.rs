@@ -75,8 +75,7 @@ fn defuzzify(operation_membership_degrees: HashMap<FuzzyAction, f64>) -> f64 {
 }
 // result: final green extension time in f64
 
-/// Public entry point: i32 ped count + i32 veh count -> f64 extend time
-pub fn run_fuzzy_inference(ped_count: i32, veh_count: i32) -> f64 {
+fn run_fuzzy_inference(ped_count: i32, veh_count: i32) -> f64 {
     /* We don't use import but*/ use crate::membership_fns::{ped_low, ped_mid, ped_high, veh_low, veh_mid, veh_high, knowledge_base};
     // IDE said NAVIGATE TO DUPLICATE here, but this is exactly what Tails doing
     // We call it function because we could utilize the same thing multiple times
@@ -100,13 +99,19 @@ pub fn run_fuzzy_inference(ped_count: i32, veh_count: i32) -> f64 {
     let rule_degrees = get_rule_membership_degree(knowledge_base, ped_degrees, veh_degrees);
     let op_degrees   = get_operation_membership_degree(rule_degrees);
 
-    let historical_ext_time :f64 = 0.0; // conn to db later
+    /*return*/ defuzzify(op_degrees)
+}
 
-    // If anything goes wrong and make historical extention time = 0, make current weight 100%
+/// Public entry point: current i32 ped count + current i32 veh count -> f64 extend time
+pub fn get_extension_time(ped_count: i32, veh_count: i32) -> f64 {
+    let current_ext_time = run_fuzzy_inference(ped_count, veh_count);
+    let historical_ext_time: f64 = 0.0; // conn to db later
+
     if historical_ext_time == 0.0 {
-        /*return*/ defuzzify(op_degrees)    // current 100%
+        current_ext_time // current 100%
     } else {
         // weighted historical & current: current * weight + historical * (1 - weight)
-        /*return*/(defuzzify(op_degrees) * crate::config::CURRENT_EXTEND_TIME_WEIGHT) + historical_ext_time * (1.0 - crate::config::CURRENT_EXTEND_TIME_WEIGHT)
+        (current_ext_time * crate::config::CURRENT_EXTEND_TIME_WEIGHT)
+            + historical_ext_time * (1.0 - crate::config::CURRENT_EXTEND_TIME_WEIGHT)
     }
 }

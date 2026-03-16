@@ -16,45 +16,48 @@ use rusqlite::Connection;
 // I guess if they are not familiar with English and just take a glance they would consider this essay a description of the file or something, but when they take a closer look it would be rickroll
 const SQL_FILE_LOCATION: &str = "./sqheavy/db.sqlite";
 
-pub enum SQLInitError {
+#[derive(Debug)]
+pub enum SQLError {
+    InvalidTable(String),
+    EmptyFuzzyResult,
     ReadInitFileFailed(String),
     DBConnectionFailed,
     ExecutionFailed(rusqlite::Error),
 }
-impl std::fmt::Display for SQLInitError {
+
+impl std::fmt::Display for SQLError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SQLInitError::ReadInitFileFailed(path_given) => write!(f, "Failed to read init.sql file. {} exists?", path_given),
-            SQLInitError::DBConnectionFailed => write!(f, "Failed to connect to the database."),
-            SQLInitError::ExecutionFailed(e) => write!(f, "SQL execution failed: {}", e),
+            SQLError::InvalidTable(table_name) => write!(f, "Invalid table name: {}", table_name),
+            SQLError::EmptyFuzzyResult => write!(f, "Fuzzy result cannot be empty."),
+            SQLError::ReadInitFileFailed(path_given) => write!(f, "Failed to read init.sql file. {} exists?", path_given),
+            SQLError::DBConnectionFailed => write!(f, "Failed to connect to the database."),
+            SQLError::ExecutionFailed(e) => write!(f, "SQL execution failed: {}", e),
         }
     }
 }
-pub fn init_sqlite_db(where_is_init_dot_sql: &str) -> Result<(), SQLInitError> {
+pub fn init_sqlite_db(where_is_init_dot_sql: &str) -> Result<(), SQLError> {
     // read init.sql
     let init_sql_content = match fs::read_to_string(where_is_init_dot_sql) {
         Ok(content) => content,
-        Err(_) => return Err(SQLInitError::ReadInitFileFailed(where_is_init_dot_sql.to_string())),
+        Err(_) => return Err(SQLError::ReadInitFileFailed(where_is_init_dot_sql.to_string())),
     };
 
     // connect to db
     let conn = match Connection::open(&SQL_FILE_LOCATION) {
         Ok(c) => c,
-        Err(_) => return Err(SQLInitError::DBConnectionFailed),
+        Err(_) => return Err(SQLError::DBConnectionFailed),
     };
 
     // do init.sql
     match conn.execute_batch(&init_sql_content) {
         Ok(_) => Ok(()),
-        Err(e) => Err(SQLInitError::ExecutionFailed(e)),
+        Err(e) => Err(SQLError::ExecutionFailed(e)),
     }
 }
 
-fn init_connection(where_is_db_file: &str) -> Option<Connection> {
-    match Connection::open(where_is_db_file) {
-        Ok(conn) => Some(conn),
-        Err(_) => None,
-    }
+fn init_connection(where_is_db_file: &str) -> Result<Connection, SQLError> {
+    Connection::open(where_is_db_file).map_err(|_| SQLError::DBConnectionFailed)
 }
 
 fn disconnect(connection: Connection) -> bool {
@@ -62,68 +65,42 @@ fn disconnect(connection: Connection) -> bool {
     true
 }
 
-
-pub enum SQLInsertError {
-    InvalidTable(String),
-    EmptyFuzzyResult,
-    DBConnectionFailed,
-    ExecutionFailed(rusqlite::Error),
-}
-impl std::fmt::Display for SQLInsertError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SQLInsertError::InvalidTable(wrong_table_name) => write!(f, "Invalid table name provided: {}", wrong_table_name),
-            SQLInsertError::EmptyFuzzyResult => write!(f, "Fuzzy result cannot be empty."),
-            SQLInsertError::DBConnectionFailed => write!(f, "Failed to connect to the database."),
-            SQLInsertError::ExecutionFailed(e) => write!(f, "SQL execution failed: {}", e),
-        }
-    }
-}
-
 // table: vehicle_fuzzy_results / pedestrian_fuzzy_results
 const TABLE_LIST: [&str; 2] = ["vehicle_fuzzy_results", "pedestrian_fuzzy_results"];
 // fuzzy_result: recommended but not restricted, LOW / MEDIUM / HIGH
-pub fn insert(table: &str, fuzzy_result :&str) -> Result<(), SQLInsertError> {
+pub fn insert(table: &str, fuzzy_result :&str) -> Result<(), SQLError> {
     // table MUST whitelist, fuzzy_result not empty
     if !TABLE_LIST.contains(&table) {
-        return Err(SQLInsertError::InvalidTable(table.to_string()));
+        return Err(SQLError::InvalidTable(table.to_string()));
     }
     if fuzzy_result.is_empty() {
-        return Err(SQLInsertError::EmptyFuzzyResult);
+        return Err(SQLError::EmptyFuzzyResult);
     }
     // connect to db
-    let conn = match init_connection(SQL_FILE_LOCATION) {
-        Some(c) => c,
-        None => return Err(SQLInsertError::DBConnectionFailed),
-    };
+    let conn = init_connection(SQL_FILE_LOCATION)?;
     // INSERT INTO table <fuzzy_result> VALUES <fuzzy_result>;
     let sql: String = format!("INSERT INTO {} (fuzzy_result, created_at) VALUES (?1, ?2)", table);
     let time_now: i64 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
-    match conn.execute(&sql, rusqlite::params![fuzzy_result, time_now]) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(SQLInsertError::ExecutionFailed(e)),
-    }
+    conn.execute(&sql, rusqlite::params![fuzzy_result, time_now])
+        .map(|_| ())
+        .map_err(SQLError::ExecutionFailed)
 }
 
-pub enum SQLSelectError {
-    InvalidTable(String),
-    DBConnectionFailed,
-    ExecutionFailed(rusqlite::Error),
-}
 // get average object count
 // how to do it: time - 24 hours, get the closest record with 1 before and 1 after, avg 3 as the result of the day
 // repeat this for 7 times and get 7 days' avg, then avg them to get a final result
 // the final result will be sent to fuzzy_inference
-pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLSelectError> {
+pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
     // table MUST whitelist
     if !TABLE_LIST.contains(&table) {
-        return Err(SQLSelectError::InvalidTable(table.to_string()));
+        return Err(SQLError::InvalidTable(table.to_string()));
     }
-    let conn = match init_connection(SQL_FILE_LOCATION) {
-        Some(c) => c,
-        None => return Err(SQLSelectError::DBConnectionFailed),
-    };
+
+    let conn = init_connection(SQL_FILE_LOCATION)?;
+
+    // cleanup and propagate error
+    cleanup(&conn)?;
 
     let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -155,7 +132,7 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLSelectError> {
         let (center_rowid, center_count, _center_created_at) = match closest {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => continue, // no data for this day anchor
-            Err(e) => return Err(SQLSelectError::ExecutionFailed(e)),
+            Err(e) => return Err(SQLError::ExecutionFailed(e)),
         };
 
         // 2. Find 1 prev and 1 after record
@@ -176,7 +153,7 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLSelectError> {
         ) {
             Ok(v) => Some(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(SQLSelectError::ExecutionFailed(e)),
+            Err(e) => return Err(SQLError::ExecutionFailed(e)),
         };
 
         let next_count: Option<i32> = match conn.query_row(
@@ -186,7 +163,7 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLSelectError> {
         ) {
             Ok(v) => Some(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(SQLSelectError::ExecutionFailed(e)),
+            Err(e) => return Err(SQLError::ExecutionFailed(e)),
         };
 
         // 3. cal day avg
@@ -220,4 +197,28 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLSelectError> {
     Ok(week_avg.round() as i32)
     // Different from c++, it would round to the nearest int, but not flooring
     // That was unexpected, we are feeling better with rust
+}
+
+// Clear old records, keep only the latest 7 days' data, run once an hour
+static LAST_CLEANUP: Lazy<Mutex<std::time::SystemTime>> = Lazy::new(|| Mutex::new(std::time::SystemTime::now()));
+fn cleanup(conn: &Connection) -> Result<(), SQLError> {
+    let now = std::time::SystemTime::now();
+    let mut last_cleanup = LAST_CLEANUP.lock().unwrap();
+    if now.duration_since(*last_cleanup).unwrap_or_default().as_secs() < 3600 {
+        return Ok(()); // not time to clean up yet
+    }
+
+    let seven_days_ago = now - std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let seven_days_ago_timestamp = seven_days_ago.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+
+    for table in &TABLE_LIST {
+        let sql = format!("DELETE FROM {} WHERE created_at < ?1", table);
+        match conn.execute(&sql, rusqlite::params![seven_days_ago_timestamp]) {
+            Ok(_) => (),
+            Err(e) => return Err(SQLError::ExecutionFailed(e)),
+        }
+    }
+
+    *last_cleanup = now;
+    Ok(())
 }

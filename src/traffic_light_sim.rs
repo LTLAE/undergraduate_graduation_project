@@ -9,7 +9,7 @@ use egui::{Color32, Pos2, Stroke, Vec2};
 use rand::Rng;
 use crate::config;
 use crate::traffic_light::{TrafficSign, TrafficLight, LightState};
-use crate::fuzzy_inference::run_fuzzy_inference;
+use crate::fuzzy_inference::{get_extension_time};
 
 // ---------------------------------------------------------------------------
 // Shared simulation state
@@ -609,7 +609,7 @@ impl eframe::App for TrafficLightApp {
                                     match self.ui_ped_text.trim().parse::<i32>() {
                                         Ok(ped_count) if ped_count >= 0 => {
                                             let veh_count = self.ui_veh_text.trim().parse::<i32>().unwrap_or(0).max(0);
-                                            let ext = run_fuzzy_inference(ped_count, veh_count);
+                                            let ext = get_extension_time(ped_count, veh_count);
                                             self.fuzzy_ped_result = Some(ext);
                                             self.ped_err = None;
                                             self.state.lock().unwrap().manual_ped_ext = Some(ext);
