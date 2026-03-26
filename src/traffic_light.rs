@@ -15,6 +15,13 @@ pub enum LightState {
     Blinking,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum TrafficLightPosition {
+    Ped1,
+    Veh1,
+}
+
+#[derive(Clone)]
 pub struct TrafficLight {
     pub sig_ped: (crate::traffic_light::TrafficSign, crate::traffic_light::LightState),
     pub sig_veh: (crate::traffic_light::TrafficSign, crate::traffic_light::LightState),
@@ -22,18 +29,19 @@ pub struct TrafficLight {
 }
 
 impl TrafficLight {
-    // sig_pos must be either "ped" or "veh"
-    pub fn set_sig(&mut self, sig_pos: &str, next_sign: TrafficSign) {
+    // Sets the signal color and state
+    pub fn set_sig(&mut self, sig_pos: TrafficLightPosition, next_sign: TrafficSign, next_state: LightState) {
         match sig_pos {
-            "ped" => {
+            TrafficLightPosition::Ped1 => {
                 // since ped have no yellow light, raise error when trying to do so
                 if next_sign == TrafficSign::Yellow {
                     panic!("Pedestrian signal cannot be yellow");
                 }
-                self.sig_ped.0 = next_sign
+                self.sig_ped = (next_sign, next_state);
             },
-            "veh" => self.sig_veh.0 = next_sign,
-            _ => panic!("Invalid signal position: {}", sig_pos),
+            TrafficLightPosition::Veh1 => {
+                self.sig_veh = (next_sign, next_state);
+            },
         }
     }
 
