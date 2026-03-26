@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use crate::membership_fns::{FuzzyAction, FuzzyLabels};
 use crate::config::{T_MIN, T_MAX, STEP};
+use crate::sql_ops::get_avg_obj_count;
+
 fn get_element_membership_degree(   // 3.3.1
     exact_value: i32,
     membership_fn_list: Vec<(FuzzyLabels, fn(i32) -> f64)>
@@ -105,13 +107,25 @@ fn run_fuzzy_inference(ped_count: i32, veh_count: i32) -> f64 {
 /// Public entry point: current i32 ped count + current i32 veh count -> f64 extend time
 pub fn get_extension_time(ped_count: i32, veh_count: i32) -> f64 {
     let current_ext_time = run_fuzzy_inference(ped_count, veh_count);
-    let historical_ext_time: f64 = 0.0; // conn to db later
+
+    // Get 7d avg form db, is any err, return 0.0 and use current only
+    let historical_ext_time: f64 = match (
+        get_avg_obj_count("pedestrian_fuzzy_results"),
+        get_avg_obj_count("vehicle_fuzzy_results"),
+    ) {
+        (Ok(ped_avg), Ok(veh_avg))
+        if ped_avg > 0 || veh_avg > 0 => {
+            // Reuse fuzzy inference on historical averages to derive a historical extension.
+            // return like an inline fn
+            run_fuzzy_inference(ped_avg.max(0), veh_avg.max(0))
+        }
+        // except any exception as _, return 0.0
+        _ => 0.0,
+    };
 
     if historical_ext_time == 0.0 {
-        current_ext_time // current 100%
+        /*return*/ current_ext_time
     } else {
-        // weighted historical & current: current * weight + historical * (1 - weight)
-        (current_ext_time * crate::config::CURRENT_EXTEND_TIME_WEIGHT)
-            + historical_ext_time * (1.0 - crate::config::CURRENT_EXTEND_TIME_WEIGHT)
+        /*return*/ (current_ext_time * crate::config::CURRENT_EXTEND_TIME_WEIGHT) + historical_ext_time * (1.0 - crate::config::CURRENT_EXTEND_TIME_WEIGHT)
     }
 }
