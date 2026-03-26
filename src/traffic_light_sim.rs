@@ -1,14 +1,13 @@
+// UI mostly build by ChatGPT or Claude Haiku & GitHub Copilot
 // traffic_light_sim.rs — Traffic light simulation UI
 // Uses egui/eframe for rendering; simulation loop runs on a background thread.
-// Fuzzy extension values are mocked with random numbers for demonstration.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use eframe::egui;
 use egui::{Color32, Pos2, Stroke, Vec2};
-use rand::Rng;
 use crate::config;
-use crate::traffic_light::{TrafficSign, TrafficLight, LightState};
+use crate::traffic_light::{TrafficSign, TrafficLight, LightState, TrafficLightPosition};
 use crate::fuzzy_inference::{get_extension_time};
 use crate::call_py_yolo::{count_people, count_cars};
 use std::path::Path;
@@ -44,9 +43,7 @@ impl Phase {
 #[derive(Clone)]
 pub struct SimState {
     pub phase:         Phase,
-    pub ped_sign:      TrafficSign,
     pub ped_blinking:  bool,
-    pub veh_sign:      TrafficSign,
     pub veh_blinking:  bool,
     /// Seconds remaining in the current sub-phase
     pub countdown:     f64,
@@ -59,6 +56,8 @@ pub struct SimState {
     pub paused:        bool,
     /// Blink toggle driven by sim thread
     pub blink_on:      bool,
+    // ── Traffic light state (source of truth) ────────────────────────────
+    pub traffic_light: TrafficLight,
     // ── Manual fuzzy input (pedestrian only) ─────────────────────────────
     /// Raw text typed in the pedestrian count input box
     pub input_ped_text:  String,
@@ -70,15 +69,30 @@ pub struct SimState {
     pub manual_applied:  bool,
     /// Set to true to skip the remainder of the current phase immediately
     pub skip_phase:      bool,
+    // ── Manual control mode ──────────────────────────────────────────────
+    /// Enable manual control: timer frozen, manual phase switching allowed
+    pub manual_control_enabled: bool,
+    /// Request to switch to next phase (during manual control)
+    pub manual_switch_phase: bool,
+    /// Current blinking duration during manual phase switch (in seconds)
+    pub manual_blink_countdown: f64,
+    /// Flag indicating we are exiting manual mode and waiting for all red before enabling auto cycle
+    pub exiting_manual_mode: bool,
+    /// All Red Hold mode: keeps all lights red until manually disabled
+    pub all_red_hold_enabled: bool,
+    /// Flag to transition to all red hold after blink sequence
+    pub transitioning_to_all_red: bool,
+    /// Maintenance mode: veh yellow blinking, ped off, waiting for On button
+    pub maintenance_mode_enabled: bool,
+    /// Flag to transition to maintenance mode after blink sequence
+    pub transitioning_to_maintenance: bool,
 }
 
 impl Default for SimState {
     fn default() -> Self {
         Self {
             phase:         Phase::PedestrianGreen,
-            ped_sign:      TrafficSign::Green,
             ped_blinking:  false,
-            veh_sign:      TrafficSign::Red,
             veh_blinking:  false,
             countdown:     config::PHASE_BASIC_PED_GREEN,
             cycle_count:   0,
@@ -86,11 +100,24 @@ impl Default for SimState {
             speed:         1.0,
             paused:        false,
             blink_on:      true,
+            traffic_light: TrafficLight {
+                sig_ped: (TrafficSign::Green, LightState::Solid),
+                sig_veh: (TrafficSign::Red, LightState::Solid),
+                time: config::PHASE_BASIC_PED_GREEN,
+            },
             input_ped_text: String::new(),
             input_veh_text: String::new(),
             manual_ped_ext: None,
             manual_applied: false,
             skip_phase:     false,
+            manual_control_enabled: false,
+            manual_switch_phase: false,
+            manual_blink_countdown: 0.0,
+            exiting_manual_mode: false,
+            all_red_hold_enabled: false,
+            transitioning_to_all_red: false,
+            maintenance_mode_enabled: false,
+            transitioning_to_maintenance: false,
         }
     }
 }
@@ -100,17 +127,22 @@ impl Default for SimState {
 // ---------------------------------------------------------------------------
 
 /// Advance simulated time by `sim_secs`, updating `countdown` and `blink_on`
-/// in shared state.  Respects `paused` and `speed` changes mid-sleep.
+/// in shared state. Respects `paused`, `speed`, and `manual_control_enabled` changes mid-sleep.
 fn sim_sleep(sim_secs: f64, state: &Arc<Mutex<SimState>>) {
     let tick = Duration::from_millis(50);
     let mut simulated_elapsed = 0.0_f64;
     let mut blink_acc         = 0.0_f64;
 
     loop {
-        let (speed, paused, skip) = {
+        let (speed, paused, skip, manual_enabled) = {
             let s = state.lock().unwrap();
-            (s.speed, s.paused, s.skip_phase)
+            (s.speed, s.paused, s.skip_phase, s.manual_control_enabled)
         };
+
+        // If manual control is enabled, just break (preserve current state)
+        if manual_enabled {
+            break;
+        }
 
         // Skip: clear flag, re-pause, and exit immediately
         if skip {
@@ -150,15 +182,184 @@ fn sim_sleep(sim_secs: f64, state: &Arc<Mutex<SimState>>) {
     }
 }
 
-/// Generate a mock fuzzy extension time (replaces real camera + fuzzy inference).
-fn mock_fuzzy_extension(max_ext: f64) -> f64 {
-    let mut rng = rand::rng();
-    let r: f64  = rng.random();
-    (r * r * max_ext).min(max_ext)
+/// Sleep function for manual phase transitions - executes full countdown regardless of manual_control_enabled
+/// This is used during manual Next Phase transitions to show proper animations/blinks
+fn manual_sim_sleep(sim_secs: f64, state: &Arc<Mutex<SimState>>) {
+    let tick = Duration::from_millis(50);
+    let mut simulated_elapsed = 0.0_f64;
+    let mut blink_acc         = 0.0_f64;
+
+    loop {
+        let speed = state.lock().unwrap().speed;
+
+        std::thread::sleep(tick);
+
+        let delta = tick.as_secs_f64() * speed;
+        simulated_elapsed += delta;
+        blink_acc         += delta;
+
+        // Toggle blink every 0.5 simulated seconds
+        if blink_acc >= 0.5 {
+            blink_acc -= 0.5;
+            let mut s = state.lock().unwrap();
+            s.blink_on = !s.blink_on;
+        }
+
+        // Update countdown
+        {
+            let mut s     = state.lock().unwrap();
+            s.countdown   = (sim_secs - simulated_elapsed).max(0.0);
+        }
+
+        if simulated_elapsed >= sim_secs {
+            break;
+        }
+    }
+}
+
+/// Generate a fuzzy extension time based on pedestrian and vehicle counts.
+fn get_fuzzy_extension() -> f64 {
+    // Use default counts (0, 0) for automatic cycle
+    // In real deployment, this would pull from actual camera/sensor data
+    get_extension_time(0, 0)
+}
+
+/// Transition to the next phase by executing full transition sequences.
+/// This function performs the complete ped->red->veh->green or veh->red->ped->green sequence.
+/// Returns early if the user disables manual control mid-transition.
+fn manual_phase_transition(state: &Arc<Mutex<SimState>>) {
+    // Snapshot current phase and signals to decide if transition is allowed
+    let (phase, ped_sig, veh_sig) = {
+        let s = state.lock().unwrap();
+        (s.phase.clone(), s.traffic_light.sig_ped.0.clone(), s.traffic_light.sig_veh.0.clone())
+    };
+
+    // Helper to clear the request flag
+    let clear_switch_flag = || {
+        state.lock().unwrap().manual_switch_phase = false;
+    };
+
+    match (phase, ped_sig, veh_sig) {
+        // Pedestrian green -> Vehicle green sequence
+        (Phase::PedestrianGreen, TrafficSign::Green, TrafficSign::Red) => {
+            // Ped green blinking
+            {
+                let mut s = state.lock().unwrap();
+                s.ped_blinking = true;
+                s.countdown = config::PED_GREEN_BLINKING;
+                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
+            }
+            manual_sim_sleep(config::PED_GREEN_BLINKING, state);
+
+            // Ped to red, all-red interval
+            {
+                let mut s = state.lock().unwrap();
+                s.ped_blinking = false;
+                s.phase = Phase::AllRedBeforeVehicle;
+                s.countdown = config::ALL_RED;
+                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Solid);
+            }
+            manual_sim_sleep(config::ALL_RED, state);
+
+            // Vehicle to green
+            {
+                let mut s = state.lock().unwrap();
+                s.phase = Phase::VehicleGreen;
+                s.veh_blinking = false;
+                s.countdown = 0.0;
+                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Solid);
+                s.manual_switch_phase = false;
+            }
+        }
+
+        // Vehicle green -> Pedestrian green sequence
+        (Phase::VehicleGreen, TrafficSign::Red, TrafficSign::Green) => {
+            // Vehicle green blinking
+            {
+                let mut s = state.lock().unwrap();
+                s.veh_blinking = true;
+                s.countdown = config::VEH_GREEN_BLINKING;
+                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
+            }
+            manual_sim_sleep(config::VEH_GREEN_BLINKING, state);
+
+            // Vehicle yellow solid
+            {
+                let mut s = state.lock().unwrap();
+                s.veh_blinking = false;
+                s.phase = Phase::VehicleYellow;
+                s.countdown = config::VEH_YELLOW;
+                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Solid);
+            }
+            manual_sim_sleep(config::VEH_YELLOW, state);
+
+            // All red before pedestrians
+            {
+                let mut s = state.lock().unwrap();
+                s.phase = Phase::AllRedBeforePedestrian;
+                s.countdown = config::ALL_RED;
+                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
+            }
+            manual_sim_sleep(config::ALL_RED, state);
+
+            // Pedestrian green
+            {
+                let mut s = state.lock().unwrap();
+                s.phase = Phase::PedestrianGreen;
+                s.ped_blinking = false;
+                s.countdown = 0.0;
+                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Solid);
+                s.manual_switch_phase = false;
+            }
+        }
+
+        // Other states: ignore the request
+        _ => {
+            clear_switch_flag();
+        }
+    }
 }
 
 pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
     loop {
+        // Check current modes
+        let (manual_enabled, exiting_manual, all_red_enabled, maint_enabled) = {
+            let s = state.lock().unwrap();
+            (s.manual_control_enabled, s.exiting_manual_mode, s.all_red_hold_enabled, s.maintenance_mode_enabled)
+        };
+
+        // All Red Hold mode
+        if all_red_enabled {
+            let s = state.lock().unwrap().clone();
+            if s.traffic_light.sig_ped.0 != TrafficSign::Red || s.traffic_light.sig_veh.0 != TrafficSign::Red {
+                // Not yet all red, let transition happen
+                drop(s);
+            } else {
+                // In all red state, just wait and maintain it
+                drop(s);
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        }
+
+        // Maintenance mode (yellow blinking, ped off)
+        if maint_enabled {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
+        if manual_enabled {
+            // In manual mode, check for phase switch request
+            let should_switch = state.lock().unwrap().manual_switch_phase;
+            if should_switch {
+                manual_phase_transition(&state);
+            } else {
+                // Wait a bit before checking again
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            continue;
+        }
+
         // ── Phase 1: Pedestrian Green ─────────────────────────────────────
         let base_ped  = config::PHASE_BASIC_PED_GREEN;
         let half_ped  = base_ped / 2.0;
@@ -167,40 +368,49 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
         {
             let mut s    = state.lock().unwrap();
             s.phase      = Phase::PedestrianGreen;
-            s.ped_sign   = TrafficSign::Green;
             s.ped_blinking = false;
-            s.veh_sign   = TrafficSign::Red;
             s.veh_blinking = false;
             s.countdown  = half_ped;
             s.blink_on   = true;
+            s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Solid);
+            s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
         }
-        // First half
-        sim_sleep(half_ped, &state);
 
-        // Fuzzy inference: use manual input if set, otherwise mock
-        let ped_ext = {
-            let mut s = state.lock().unwrap();
-            if let Some(ext) = s.manual_ped_ext.take() {
-                s.ped_extension = ext;
-                ext
-            } else {
-                let ext = mock_fuzzy_extension(config::T_MAX / 4.0);
-                s.ped_extension = ext;
-                ext
+        // Check if we are exiting manual mode - if so, skip to blinking immediately
+        let skip_to_ped_blinking = state.lock().unwrap().exiting_manual_mode;
+
+        if !skip_to_ped_blinking {
+            // First half
+            sim_sleep(half_ped, &state);
+            if state.lock().unwrap().manual_control_enabled { continue; }
+
+            // Fuzzy inference: use manual input if set, otherwise compute from sensor data
+            let ped_ext = {
+                let mut s = state.lock().unwrap();
+                if let Some(ext) = s.manual_ped_ext.take() {
+                    s.ped_extension = ext;
+                    ext
+                } else {
+                    let ext = get_fuzzy_extension();
+                    s.ped_extension = ext;
+                    ext
+                }
+            };
+
+            // Extension
+            if ped_ext > 0.1 {
+                { state.lock().unwrap().countdown = ped_ext; }
+                sim_sleep(ped_ext, &state);
+                if state.lock().unwrap().manual_control_enabled { continue; }
             }
-        };
 
-        // Extension
-        if ped_ext > 0.1 {
-            { state.lock().unwrap().countdown = ped_ext; }
-            sim_sleep(ped_ext, &state);
-        }
-
-        // Second half minus blinking time
-        let second_solid = (half_ped - config::PED_GREEN_BLINKING).max(0.0);
-        if second_solid > 0.0 {
-            { state.lock().unwrap().countdown = second_solid; }
-            sim_sleep(second_solid, &state);
+            // Second half minus blinking time
+            let second_solid = (half_ped - config::PED_GREEN_BLINKING).max(0.0);
+            if second_solid > 0.0 {
+                { state.lock().unwrap().countdown = second_solid; }
+                sim_sleep(second_solid, &state);
+                if state.lock().unwrap().manual_control_enabled { continue; }
+            }
         }
 
         // Blinking
@@ -208,18 +418,47 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
             let mut s      = state.lock().unwrap();
             s.ped_blinking = true;
             s.countdown    = config::PED_GREEN_BLINKING;
+            s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
         }
         sim_sleep(config::PED_GREEN_BLINKING, &state);
+        if state.lock().unwrap().manual_control_enabled { continue; }
 
         // ── All-Red before vehicles ────────────────────────────────────────
         {
             let mut s      = state.lock().unwrap();
             s.phase        = Phase::AllRedBeforeVehicle;
-            s.ped_sign     = TrafficSign::Red;
             s.ped_blinking = false;
             s.countdown    = config::ALL_RED;
+            s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Solid);
         }
         sim_sleep(config::ALL_RED, &state);
+        if state.lock().unwrap().manual_control_enabled { continue; }
+
+        // Clear exiting_manual_mode flag after reaching all red
+        {
+            let mut s = state.lock().unwrap();
+            if s.exiting_manual_mode {
+                s.exiting_manual_mode = false;
+            }
+
+            // Check if transitioning to all red hold
+            if s.transitioning_to_all_red {
+                s.transitioning_to_all_red = false;
+                s.all_red_hold_enabled = true;
+                continue;
+            }
+
+            // Check if transitioning to maintenance mode
+            if s.transitioning_to_maintenance {
+                s.transitioning_to_maintenance = false;
+                s.maintenance_mode_enabled = true;
+                // Set veh to yellow blinking, ped off
+                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Blinking);
+                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Off);
+                s.veh_blinking = true;
+                continue;
+            }
+        }
 
         // ── Phase 2: Vehicle Green (fixed duration, no fuzzy extension) ──────
         let base_veh  = config::PHASE_BASIC_VEH_GREEN;
@@ -228,39 +467,76 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
         {
             let mut s      = state.lock().unwrap();
             s.phase        = Phase::VehicleGreen;
-            s.veh_sign     = TrafficSign::Green;
             s.veh_blinking = false;
             s.countdown    = veh_solid;
             s.blink_on     = true;
+            s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Solid);
         }
-        sim_sleep(veh_solid, &state);
+
+        // Check if we are exiting manual mode - if so, skip to blinking immediately
+        let skip_to_veh_blinking = state.lock().unwrap().exiting_manual_mode;
+
+        if !skip_to_veh_blinking {
+            sim_sleep(veh_solid, &state);
+            if state.lock().unwrap().manual_control_enabled { continue; }
+        }
 
         // Blinking
         {
             let mut s      = state.lock().unwrap();
             s.veh_blinking = true;
             s.countdown    = config::VEH_GREEN_BLINKING;
+            s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
         }
         sim_sleep(config::VEH_GREEN_BLINKING, &state);
+        if state.lock().unwrap().manual_control_enabled { continue; }
 
         // ── Vehicle Yellow ─────────────────────────────────────────────────
         {
             let mut s      = state.lock().unwrap();
             s.phase        = Phase::VehicleYellow;
-            s.veh_sign     = TrafficSign::Yellow;
             s.veh_blinking = false;
             s.countdown    = config::VEH_YELLOW;
+            s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Solid);
         }
         sim_sleep(config::VEH_YELLOW, &state);
+        if state.lock().unwrap().manual_control_enabled { continue; }
 
         // ── All-Red before pedestrians ────────────────────────────────────
         {
             let mut s      = state.lock().unwrap();
             s.phase        = Phase::AllRedBeforePedestrian;
-            s.veh_sign     = TrafficSign::Red;
             s.countdown    = config::ALL_RED;
+            s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
         }
         sim_sleep(config::ALL_RED, &state);
+        if state.lock().unwrap().manual_control_enabled { continue; }
+
+        // Clear exiting_manual_mode flag after reaching all red
+        {
+            let mut s = state.lock().unwrap();
+            if s.exiting_manual_mode {
+                s.exiting_manual_mode = false;
+            }
+
+            // Check if transitioning to all red hold
+            if s.transitioning_to_all_red {
+                s.transitioning_to_all_red = false;
+                s.all_red_hold_enabled = true;
+                continue;
+            }
+
+            // Check if transitioning to maintenance mode
+            if s.transitioning_to_maintenance {
+                s.transitioning_to_maintenance = false;
+                s.maintenance_mode_enabled = true;
+                // Set veh to yellow blinking, ped off
+                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Blinking);
+                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Off);
+                s.veh_blinking = true;
+                continue;
+            }
+        }
 
         // Cycle complete
         { state.lock().unwrap().cycle_count += 1; }
@@ -287,7 +563,7 @@ fn draw_bulb(painter: &egui::Painter, center: Pos2, radius: f32, lit: bool, colo
 // Draw vehicle traffic light (R / Y / G)
 // ---------------------------------------------------------------------------
 
-fn draw_vehicle_light(ui: &mut egui::Ui, snap: &SimState) {
+fn draw_vehicle_light(ui: &mut egui::Ui, traffic_light: &TrafficLight, blink_on: bool, veh_blinking: bool) {
     let r   = 20.0_f32;
     let pad = 10.0_f32;
     let w   = r * 2.0 + pad * 2.0;
@@ -299,12 +575,11 @@ fn draw_vehicle_light(ui: &mut egui::Ui, snap: &SimState) {
     painter.rect_filled(rect, egui::CornerRadius::same(12), Color32::from_rgb(28, 28, 28));
     painter.rect_stroke(rect, egui::CornerRadius::same(12), Stroke::new(2.0, Color32::from_rgb(70, 70, 70)), egui::StrokeKind::Outside);
 
-    let blink_on = snap.blink_on;
-    let cx       = rect.center().x;
+    let cx = rect.center().x;
 
-    let red_lit    = snap.veh_sign == TrafficSign::Red    && (!snap.veh_blinking || blink_on);
-    let yellow_lit = snap.veh_sign == TrafficSign::Yellow && (!snap.veh_blinking || blink_on);
-    let green_lit  = snap.veh_sign == TrafficSign::Green  && (!snap.veh_blinking || blink_on);
+    let red_lit    = traffic_light.sig_veh.0 == TrafficSign::Red    && (!veh_blinking || blink_on);
+    let yellow_lit = traffic_light.sig_veh.0 == TrafficSign::Yellow && (!veh_blinking || blink_on);
+    let green_lit  = traffic_light.sig_veh.0 == TrafficSign::Green  && (!veh_blinking || blink_on);
 
     draw_bulb(&painter, Pos2::new(cx, rect.min.y + pad + r),             r, red_lit,    Color32::from_rgb(220, 40, 40));
     draw_bulb(&painter, Pos2::new(cx, rect.min.y + pad * 2.0 + r * 3.0), r, yellow_lit, Color32::from_rgb(220, 185, 20));
@@ -323,7 +598,7 @@ fn draw_vehicle_light(ui: &mut egui::Ui, snap: &SimState) {
 // Draw pedestrian traffic light (R / G)
 // ---------------------------------------------------------------------------
 
-fn draw_pedestrian_light(ui: &mut egui::Ui, snap: &SimState) {
+fn draw_pedestrian_light(ui: &mut egui::Ui, traffic_light: &TrafficLight, blink_on: bool, ped_blinking: bool) {
     let r   = 16.0_f32;
     let pad = 8.0_f32;
     let w   = 120.0_f32;
@@ -335,11 +610,10 @@ fn draw_pedestrian_light(ui: &mut egui::Ui, snap: &SimState) {
     painter.rect_filled(rect, egui::CornerRadius::same(12), Color32::from_rgb(28, 28, 28));
     painter.rect_stroke(rect, egui::CornerRadius::same(12), Stroke::new(2.0, Color32::from_rgb(70, 70, 70)), egui::StrokeKind::Outside);
 
-    let blink_on = snap.blink_on;
-    let cx       = rect.center().x;
+    let cx = rect.center().x;
 
-    let red_lit   = snap.ped_sign == TrafficSign::Red   && (!snap.ped_blinking || blink_on);
-    let green_lit = snap.ped_sign == TrafficSign::Green && (!snap.ped_blinking || blink_on);
+    let red_lit   = traffic_light.sig_ped.0 == TrafficSign::Red   && (!ped_blinking || blink_on);
+    let green_lit = traffic_light.sig_ped.0 == TrafficSign::Green && (!ped_blinking || blink_on);
 
     // bulb 1 (red):   centre at pad + r
     // bulb 2 (green): centre at pad * 2 + r * 3  (same spacing as vehicle light)
@@ -375,7 +649,6 @@ fn info_row(ui: &mut egui::Ui, label: &str, value: &str, val_color: Color32) {
 
 struct TrafficLightApp {
     state:       Arc<Mutex<SimState>>,
-    traffic_light: TrafficLight,
     /// Local (UI-thread) text buffers for the input boxes
     ui_ped_text: String,
     ui_veh_text: String,
@@ -394,11 +667,6 @@ impl TrafficLightApp {
     fn new(state: Arc<Mutex<SimState>>) -> Self {
         Self {
             state,
-            traffic_light: TrafficLight {
-                sig_ped: (TrafficSign::Green, LightState::Solid),
-                sig_veh: (TrafficSign::Red,   LightState::Solid),
-                time: config::PHASE_BASIC_PED_GREEN,
-            },
             ui_ped_text: String::new(),
             ui_veh_text: String::new(),
             fuzzy_ped_result: None,
@@ -415,15 +683,6 @@ impl eframe::App for TrafficLightApp {
         ctx.request_repaint_after(Duration::from_millis(50));
 
         let snap = self.state.lock().unwrap().clone();
-
-        // Keep traffic_light state in sync with simulation
-        {
-            self.traffic_light.sig_ped.0 = snap.ped_sign.clone();
-            self.traffic_light.sig_ped.1 = if snap.ped_blinking { LightState::Blinking } else { LightState::Solid };
-            self.traffic_light.sig_veh.0 = snap.veh_sign.clone();
-            self.traffic_light.sig_veh.1 = if snap.veh_blinking { LightState::Blinking } else { LightState::Solid };
-            self.traffic_light.time      = snap.countdown.max(0.0);
-        }
 
         egui::CentralPanel::default()
             .frame(
@@ -482,14 +741,14 @@ impl eframe::App for TrafficLightApp {
                                     ui.horizontal_top(|ui| {
                                         ui.vertical(|ui| {
                                             ui.set_min_width(70.0);
-                                            draw_vehicle_light(ui, &snap);
+                                            draw_vehicle_light(ui, &snap.traffic_light, snap.blink_on, snap.veh_blinking);
                                         });
 
                                         ui.add_space(16.0);
 
                                         ui.vertical(|ui| {
                                             ui.set_min_width(125.0);
-                                            draw_pedestrian_light(ui, &snap);
+                                            draw_pedestrian_light(ui, &snap.traffic_light, snap.blink_on, snap.ped_blinking);
                                         });
 
                                         ui.add_space(16.0);
@@ -519,9 +778,9 @@ impl eframe::App for TrafficLightApp {
                                                     info_row(ui, "  Pedestrian Ext.", &format!("{:.1} s", snap.ped_extension), Color32::from_rgb(80, 210, 100));
                                                     ui.add_space(4.0);
                                                     ui.label(egui::RichText::new("TrafficLight State").size(12.0).color(Color32::from_rgb(150,150,180)));
-                                                    info_row(ui, "  Ped Signal", &format!("{:?}/{:?}", self.traffic_light.sig_ped.0, self.traffic_light.sig_ped.1), Color32::from_rgb(80, 210, 100));
-                                                    info_row(ui, "  Veh Signal", &format!("{:?}/{:?}", self.traffic_light.sig_veh.0, self.traffic_light.sig_veh.1), Color32::from_rgb(80, 170, 255));
-                                                    info_row(ui, "  Time", &format!("{:.1} s", self.traffic_light.time), Color32::LIGHT_GRAY);
+                                                    info_row(ui, "  Ped Signal", &format!("{:?}/{:?}", snap.traffic_light.sig_ped.0, snap.traffic_light.sig_ped.1), Color32::from_rgb(80, 210, 100));
+                                                    info_row(ui, "  Veh Signal", &format!("{:?}/{:?}", snap.traffic_light.sig_veh.0, snap.traffic_light.sig_veh.1), Color32::from_rgb(80, 170, 255));
+                                                    info_row(ui, "  Time", &format!("{:.1} s", snap.traffic_light.time), Color32::LIGHT_GRAY);
                                                     ui.add_space(4.0);
                                                     ui.label(egui::RichText::new("Timing Parameters").size(12.0).color(Color32::from_rgb(150,150,180)));
                                                     info_row(ui, "  Ped. Green", &format!("{} s", config::PHASE_BASIC_PED_GREEN as u32), Color32::LIGHT_GRAY);
@@ -731,6 +990,9 @@ impl eframe::App for TrafficLightApp {
                 ui.add_space(8.0);
 
                 // ── Bottom controls ─────────────────────────────────────────
+                let snap = self.state.lock().unwrap().clone();
+                let pause_controls_disabled = snap.exiting_manual_mode;
+
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("⚡ Speed").size(13.0).color(Color32::LIGHT_GRAY));
@@ -765,25 +1027,44 @@ impl eframe::App for TrafficLightApp {
                         ui.label(egui::RichText::new("▶ Control").size(13.0).color(Color32::LIGHT_GRAY));
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let (lbl, fill) = {
+                            let manual_enabled = snap.manual_control_enabled;
+                            let (lbl, fill, text_color) = {
                                 let s = self.state.lock().unwrap();
-                                if s.paused {
-                                    ("▶  Resume", Color32::from_rgb(45, 185, 75))
+                                if pause_controls_disabled {
+                                    // Exiting manual mode: all pause controls disabled
+                                    if s.paused {
+                                        ("▶  Resume", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
+                                    } else {
+                                        ("⏸  Pause", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
+                                    }
+                                } else if manual_enabled {
+                                    // Manual mode: button is disabled
+                                    if s.paused {
+                                        ("▶  Resume", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
+                                    } else {
+                                        ("⏸  Pause", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
+                                    }
                                 } else {
-                                    ("⏸  Pause", Color32::from_rgb(195, 70, 45))
+                                    // Auto mode: button is enabled
+                                    if s.paused {
+                                        ("▶  Resume", Color32::from_rgb(45, 185, 75), Color32::WHITE)
+                                    } else {
+                                        ("⏸  Pause", Color32::from_rgb(195, 70, 45), Color32::WHITE)
+                                    }
                                 }
                             };
                             let btn = egui::Button::new(
-                                egui::RichText::new(lbl).size(14.0).color(Color32::WHITE),
+                                egui::RichText::new(lbl).size(14.0).color(text_color),
                             )
                             .fill(fill)
                             .min_size(Vec2::new(96.0, 32.0));
-                            if ui.add(btn).clicked() {
+                            let button_response = ui.add_enabled(!manual_enabled && !pause_controls_disabled, btn);
+                            if !manual_enabled && !pause_controls_disabled && button_response.clicked() {
                                 let mut s = self.state.lock().unwrap();
                                 s.paused = !s.paused;
                             }
 
-                            if snap.paused {
+                            if snap.paused && !manual_enabled && !pause_controls_disabled {
                                 let skip_btn = egui::Button::new(
                                     egui::RichText::new("⏭  Skip Phase").size(14.0).color(Color32::WHITE),
                                 )
@@ -797,7 +1078,170 @@ impl eframe::App for TrafficLightApp {
                             }
                         });
                     });
+
+                    ui.add_space(28.0);
+
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("🎛 Manual Mode").size(13.0).color(Color32::LIGHT_GRAY));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let manual_enabled = snap.manual_control_enabled;
+                            let (toggle_lbl, toggle_fill, toggle_text_col) = if pause_controls_disabled {
+                                // Exiting manual mode: button disabled
+                                ("● Manual ON", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
+                            } else if manual_enabled {
+                                ("● Manual ON", Color32::from_rgb(200, 80, 80), Color32::WHITE)
+                            } else {
+                                ("○ Manual OFF", Color32::from_rgb(50, 50, 68), Color32::WHITE)
+                            };
+                            let toggle_btn = egui::Button::new(
+                                egui::RichText::new(toggle_lbl).size(14.0).color(toggle_text_col),
+                            )
+                            .fill(toggle_fill)
+                            .min_size(Vec2::new(130.0, 32.0));
+                            let toggle_response = ui.add_enabled(!pause_controls_disabled, toggle_btn);
+                            if !pause_controls_disabled && toggle_response.clicked() {
+                                let mut s = self.state.lock().unwrap();
+                                if s.manual_control_enabled {
+                                    // Disable manual control: set flag to exit manual mode after reaching all red
+                                    s.manual_control_enabled = false;
+                                    s.exiting_manual_mode = true;
+
+                                    // Set current green light to blinking state
+                                    if s.traffic_light.sig_ped.0 == TrafficSign::Green {
+                                        s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
+                                        s.ped_blinking = true;
+                                    }
+                                    if s.traffic_light.sig_veh.0 == TrafficSign::Green {
+                                        s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
+                                        s.veh_blinking = true;
+                                    }
+                                } else {
+                                    // Enable manual control: pause the simulation at current state
+                                    s.manual_control_enabled = true;
+                                    s.countdown = 0.0;
+                                }
+                            }
+
+                            // Phase switch button: only enabled in manual mode
+                            let switch_enabled = manual_enabled && !pause_controls_disabled;
+                            let switch_fill = if switch_enabled {
+                                Color32::from_rgb(100, 150, 255)
+                            } else if pause_controls_disabled {
+                                Color32::from_rgb(70, 70, 85)
+                            } else {
+                                Color32::from_rgb(50, 50, 68)
+                            };
+                            let switch_text_col = if switch_enabled {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(100, 100, 120)
+                            };
+                            let switch_btn = egui::Button::new(
+                                egui::RichText::new("⏩ Next Phase").size(14.0).color(switch_text_col),
+                            )
+                            .fill(switch_fill)
+                            .min_size(Vec2::new(120.0, 32.0));
+
+                            let button_response = ui.add_enabled(switch_enabled, switch_btn);
+                            if switch_enabled && button_response.clicked() {
+                                let mut s = self.state.lock().unwrap();
+                                if s.manual_control_enabled && !s.manual_switch_phase {
+                                    s.manual_switch_phase = true;
+                                }
+                            }
+                        });
+                    });
+
+                    ui.add_space(28.0);
+
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("🔴 Special Modes").size(13.0).color(Color32::LIGHT_GRAY));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let all_red_enabled = snap.all_red_hold_enabled;
+                            let maint_enabled = snap.maintenance_mode_enabled;
+                            let modes_transitioning = snap.transitioning_to_all_red || snap.transitioning_to_maintenance;
+
+                            // All Red button
+                            let (all_red_lbl, all_red_fill, all_red_text_col) = if modes_transitioning {
+                                ("All Red...", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
+                            } else if all_red_enabled {
+                                ("● All Red ON", Color32::from_rgb(180, 60, 60), Color32::WHITE)
+                            } else {
+                                ("○ All Red OFF", Color32::from_rgb(50, 50, 68), Color32::WHITE)
+                            };
+                            let all_red_btn = egui::Button::new(
+                                egui::RichText::new(all_red_lbl).size(13.0).color(all_red_text_col),
+                            )
+                            .fill(all_red_fill)
+                            .min_size(Vec2::new(130.0, 32.0));
+                            let all_red_response = ui.add_enabled(!modes_transitioning && !maint_enabled, all_red_btn);
+                            if !modes_transitioning && !maint_enabled && all_red_response.clicked() {
+                                let mut s = self.state.lock().unwrap();
+                                if s.all_red_hold_enabled {
+                                    // Turn off all red, continue auto cycle
+                                    s.all_red_hold_enabled = false;
+                                    // Reset to all red state so auto cycle continues
+                                    s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Solid);
+                                    s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
+                                } else {
+                                    // Activate all red hold
+                                    s.transitioning_to_all_red = true;
+                                    // Start green blinking if currently green
+                                    if s.traffic_light.sig_ped.0 == TrafficSign::Green {
+                                        s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
+                                        s.ped_blinking = true;
+                                    }
+                                    if s.traffic_light.sig_veh.0 == TrafficSign::Green {
+                                        s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
+                                        s.veh_blinking = true;
+                                    }
+                                }
+                            }
+
+                            ui.add_space(12.0);
+
+                            // Maintenance mode button
+                            let (maint_lbl, maint_fill, maint_text_col) = if modes_transitioning {
+                                ("Maint...", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
+                            } else if maint_enabled {
+                                ("● Maintenance ON", Color32::from_rgb(180, 100, 60), Color32::WHITE)
+                            } else {
+                                ("○ Maintenance OFF", Color32::from_rgb(50, 50, 68), Color32::WHITE)
+                            };
+                            let maint_btn = egui::Button::new(
+                                egui::RichText::new(maint_lbl).size(13.0).color(maint_text_col),
+                            )
+                            .fill(maint_fill)
+                            .min_size(Vec2::new(155.0, 32.0));
+                            let maint_response = ui.add_enabled(!modes_transitioning && !all_red_enabled, maint_btn);
+                            if !modes_transitioning && !all_red_enabled && maint_response.clicked() {
+                                let mut s = self.state.lock().unwrap();
+                                if s.maintenance_mode_enabled {
+                                    // Enter all red, then start auto cycle
+                                    s.maintenance_mode_enabled = false;
+                                    s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
+                                    s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Solid);
+                                    s.veh_blinking = false;
+                                } else {
+                                    // Activate maintenance mode
+                                    s.transitioning_to_maintenance = true;
+                                    // Start green blinking if currently green
+                                    if s.traffic_light.sig_ped.0 == TrafficSign::Green {
+                                        s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
+                                        s.ped_blinking = true;
+                                    }
+                                    if s.traffic_light.sig_veh.0 == TrafficSign::Green {
+                                        s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
+                                        s.veh_blinking = true;
+                                    }
+                                }
+                            }
+                        });
+                    });
                 });
+
 
                 ui.add_space(10.0);
                 ui.separator();
