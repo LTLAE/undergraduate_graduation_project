@@ -22,6 +22,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
     PedestrianGreen,
+    PedestrianGreenExtension,  // Extension time during ped green
     AllRedBeforeVehicle,
     VehicleGreen,
     VehicleYellow,
@@ -32,6 +33,7 @@ impl Phase {
     pub fn label(&self) -> &str {
         match self {
             Phase::PedestrianGreen     => "Phase 1 — Pedestrian Green",
+            Phase::PedestrianGreenExtension => "Phase 1 — Pedestrian Green (Extended)",
             Phase::AllRedBeforeVehicle => "All Red — Preparing for Vehicles",
             Phase::VehicleGreen        => "Phase 2 — Vehicle Green",
             Phase::VehicleYellow       => "Vehicle Yellow",
@@ -82,10 +84,10 @@ pub struct SimState {
     pub all_red_hold_enabled: bool,
     /// Flag to transition to all red hold after blink sequence
     pub transitioning_to_all_red: bool,
-    /// Maintenance mode: veh yellow blinking, ped off, waiting for On button
-    pub maintenance_mode_enabled: bool,
-    /// Flag to transition to maintenance mode after blink sequence
-    pub transitioning_to_maintenance: bool,
+    /// Flag to transition to all red immediately after current blinking phase
+    pub all_red_after_blinking: bool,
+    /// Flag to add yellow light before all red (for vehicle green -> all red)
+    pub need_yellow_before_all_red: bool,
 }
 
 impl Default for SimState {
@@ -116,8 +118,8 @@ impl Default for SimState {
             exiting_manual_mode: false,
             all_red_hold_enabled: false,
             transitioning_to_all_red: false,
-            maintenance_mode_enabled: false,
-            transitioning_to_maintenance: false,
+            all_red_after_blinking: false,
+            need_yellow_before_all_red: false,
         }
     }
 }
@@ -134,9 +136,9 @@ fn sim_sleep(sim_secs: f64, state: &Arc<Mutex<SimState>>) {
     let mut blink_acc         = 0.0_f64;
 
     loop {
-        let (speed, paused, skip, manual_enabled) = {
+        let (speed, paused, skip, manual_enabled, transitioning_to_all_red) = {
             let s = state.lock().unwrap();
-            (s.speed, s.paused, s.skip_phase, s.manual_control_enabled)
+            (s.speed, s.paused, s.skip_phase, s.manual_control_enabled, s.transitioning_to_all_red)
         };
 
         // If manual control is enabled, just break (preserve current state)
@@ -144,12 +146,16 @@ fn sim_sleep(sim_secs: f64, state: &Arc<Mutex<SimState>>) {
             break;
         }
 
-        // Skip: clear flag, re-pause, and exit immediately
+        // If transitioning to all red, break immediately to apply the state change
+        if transitioning_to_all_red {
+            break;
+        }
+
+        // Skip: clear flag and exit immediately to move to next phase
         if skip {
             let mut s = state.lock().unwrap();
             s.skip_phase = false;
             s.countdown  = 0.0;
-            s.paused     = true;
             break;
         }
 
@@ -323,27 +329,13 @@ fn manual_phase_transition(state: &Arc<Mutex<SimState>>) {
 pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
     loop {
         // Check current modes
-        let (manual_enabled, exiting_manual, all_red_enabled, maint_enabled) = {
+        let (manual_enabled, all_red_enabled) = {
             let s = state.lock().unwrap();
-            (s.manual_control_enabled, s.exiting_manual_mode, s.all_red_hold_enabled, s.maintenance_mode_enabled)
+            (s.manual_control_enabled, s.all_red_hold_enabled)
         };
 
         // All Red Hold mode
         if all_red_enabled {
-            let s = state.lock().unwrap().clone();
-            if s.traffic_light.sig_ped.0 != TrafficSign::Red || s.traffic_light.sig_veh.0 != TrafficSign::Red {
-                // Not yet all red, let transition happen
-                drop(s);
-            } else {
-                // In all red state, just wait and maintain it
-                drop(s);
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-        }
-
-        // Maintenance mode (yellow blinking, ped off)
-        if maint_enabled {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -376,40 +368,66 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
             s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
         }
 
-        // Check if we are exiting manual mode - if so, skip to blinking immediately
-        let skip_to_ped_blinking = state.lock().unwrap().exiting_manual_mode;
+        // Check if we are exiting manual mode or transitioning to all_red - if so, skip to blinking immediately
+        // BUT: if all_red_after_blinking is set, we've already done the blinking setup in UI, so don't re-enter blinking
+        let skip_to_ped_blinking = {
+            let s = state.lock().unwrap();
+            (s.exiting_manual_mode || s.transitioning_to_all_red) && !s.all_red_after_blinking
+        };
 
         if !skip_to_ped_blinking {
             // First half
             sim_sleep(half_ped, &state);
             if state.lock().unwrap().manual_control_enabled { continue; }
+            if state.lock().unwrap().transitioning_to_all_red {
+                // Skip remaining pedestrian green phases, go straight to all red
+            } else {
+                // Fuzzy inference: use manual input if set, otherwise compute from sensor data
+                let ped_ext = {
+                    let mut s = state.lock().unwrap();
+                    if let Some(ext) = s.manual_ped_ext.take() {
+                        s.ped_extension = ext;
+                        ext
+                    } else {
+                        let ext = get_fuzzy_extension();
+                        s.ped_extension = ext;
+                        ext
+                    }
+                };
 
-            // Fuzzy inference: use manual input if set, otherwise compute from sensor data
-            let ped_ext = {
-                let mut s = state.lock().unwrap();
-                if let Some(ext) = s.manual_ped_ext.take() {
-                    s.ped_extension = ext;
-                    ext
+                // Extension
+                if ped_ext > 0.1 {
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.phase = Phase::PedestrianGreenExtension;
+                        s.countdown = ped_ext;
+                    }
+                    sim_sleep(ped_ext, &state);
+                    if state.lock().unwrap().manual_control_enabled { continue; }
+                    if state.lock().unwrap().transitioning_to_all_red {
+                        // Skip to all red
+                    } else {
+                        // Second half minus blinking time
+                        let second_solid = (half_ped - config::PED_GREEN_BLINKING).max(0.0);
+                        if second_solid > 0.0 {
+                            {
+                                let mut s = state.lock().unwrap();
+                                s.phase = Phase::PedestrianGreen;
+                            }
+                            { state.lock().unwrap().countdown = second_solid; }
+                            sim_sleep(second_solid, &state);
+                            if state.lock().unwrap().manual_control_enabled { continue; }
+                        }
+                    }
                 } else {
-                    let ext = get_fuzzy_extension();
-                    s.ped_extension = ext;
-                    ext
+                    // Second half minus blinking time
+                    let second_solid = (half_ped - config::PED_GREEN_BLINKING).max(0.0);
+                    if second_solid > 0.0 {
+                        { state.lock().unwrap().countdown = second_solid; }
+                        sim_sleep(second_solid, &state);
+                        if state.lock().unwrap().manual_control_enabled { continue; }
+                    }
                 }
-            };
-
-            // Extension
-            if ped_ext > 0.1 {
-                { state.lock().unwrap().countdown = ped_ext; }
-                sim_sleep(ped_ext, &state);
-                if state.lock().unwrap().manual_control_enabled { continue; }
-            }
-
-            // Second half minus blinking time
-            let second_solid = (half_ped - config::PED_GREEN_BLINKING).max(0.0);
-            if second_solid > 0.0 {
-                { state.lock().unwrap().countdown = second_solid; }
-                sim_sleep(second_solid, &state);
-                if state.lock().unwrap().manual_control_enabled { continue; }
             }
         }
 
@@ -422,6 +440,28 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
         }
         sim_sleep(config::PED_GREEN_BLINKING, &state);
         if state.lock().unwrap().manual_control_enabled { continue; }
+
+        // Check if all_red_after_blinking was set during ped blinking
+        {
+            let mut s = state.lock().unwrap();
+            if s.all_red_after_blinking {
+                s.all_red_after_blinking = false;
+                s.transitioning_to_all_red = true;
+                s.ped_blinking = false;
+            }
+        }
+
+        if state.lock().unwrap().transitioning_to_all_red {
+            // Continue to all red phase where transition will be handled
+        }
+
+        // Check if we should interrupt for all_red_hold
+        {
+            let s = state.lock().unwrap();
+            if s.transitioning_to_all_red {
+                // Continue to the all red phase where the transition will be handled
+            }
+        }
 
         // ── All-Red before vehicles ────────────────────────────────────────
         {
@@ -448,14 +488,8 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
                 continue;
             }
 
-            // Check if transitioning to maintenance mode
-            if s.transitioning_to_maintenance {
-                s.transitioning_to_maintenance = false;
-                s.maintenance_mode_enabled = true;
-                // Set veh to yellow blinking, ped off
-                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Blinking);
-                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Off);
-                s.veh_blinking = true;
+            // Check if all red hold was enabled during the all red phase
+            if s.all_red_hold_enabled {
                 continue;
             }
         }
@@ -479,6 +513,9 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
         if !skip_to_veh_blinking {
             sim_sleep(veh_solid, &state);
             if state.lock().unwrap().manual_control_enabled { continue; }
+            if state.lock().unwrap().transitioning_to_all_red {
+                // Skip remaining vehicle green phases, go straight to all red
+            }
         }
 
         // Blinking
@@ -491,16 +528,44 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
         sim_sleep(config::VEH_GREEN_BLINKING, &state);
         if state.lock().unwrap().manual_control_enabled { continue; }
 
-        // ── Vehicle Yellow ─────────────────────────────────────────────────
+        // Check if all_red_after_blinking was set during vehicle blinking
         {
-            let mut s      = state.lock().unwrap();
-            s.phase        = Phase::VehicleYellow;
-            s.veh_blinking = false;
-            s.countdown    = config::VEH_YELLOW;
-            s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Solid);
+            let mut s = state.lock().unwrap();
+            if s.all_red_after_blinking {
+                s.all_red_after_blinking = false;
+                s.veh_blinking = false;
+                // If need_yellow_before_all_red is set, go to yellow; otherwise go to all_red
+                if s.need_yellow_before_all_red {
+                    // Will execute yellow light below
+                } else {
+                    s.transitioning_to_all_red = true;
+                }
+            }
         }
-        sim_sleep(config::VEH_YELLOW, &state);
-        if state.lock().unwrap().manual_control_enabled { continue; }
+
+        if state.lock().unwrap().transitioning_to_all_red {
+            // Skip vehicle yellow, go straight to all red before pedestrians
+        } else {
+            // ── Vehicle Yellow ─────────────────────────────────────────────────
+            {
+                let mut s      = state.lock().unwrap();
+                s.phase        = Phase::VehicleYellow;
+                s.veh_blinking = false;
+                s.countdown    = config::VEH_YELLOW;
+                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Solid);
+            }
+            sim_sleep(config::VEH_YELLOW, &state);
+            if state.lock().unwrap().manual_control_enabled { continue; }
+
+            // Check if need_yellow_before_all_red was set (yellow after all_red blinking)
+            {
+                let mut s = state.lock().unwrap();
+                if s.need_yellow_before_all_red {
+                    s.need_yellow_before_all_red = false;
+                    s.transitioning_to_all_red = true;
+                }
+            }
+        }
 
         // ── All-Red before pedestrians ────────────────────────────────────
         {
@@ -526,14 +591,8 @@ pub fn run_sim_loop(state: Arc<Mutex<SimState>>) {
                 continue;
             }
 
-            // Check if transitioning to maintenance mode
-            if s.transitioning_to_maintenance {
-                s.transitioning_to_maintenance = false;
-                s.maintenance_mode_enabled = true;
-                // Set veh to yellow blinking, ped off
-                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Yellow, LightState::Blinking);
-                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Off);
-                s.veh_blinking = true;
+            // Check if all red hold was enabled during the all red phase
+            if s.all_red_hold_enabled {
                 continue;
             }
         }
@@ -702,7 +761,8 @@ impl eframe::App for TrafficLightApp {
                             .strong(),
                     );
                     let phase_color = match snap.phase {
-                        Phase::PedestrianGreen        => Color32::from_rgb(60, 210, 80),
+                        Phase::PedestrianGreen
+                        | Phase::PedestrianGreenExtension => Color32::from_rgb(60, 210, 80),
                         Phase::VehicleGreen           => Color32::from_rgb(60, 180, 255),
                         Phase::VehicleYellow          => Color32::from_rgb(230, 190, 20),
                         Phase::AllRedBeforeVehicle
@@ -991,7 +1051,7 @@ impl eframe::App for TrafficLightApp {
 
                 // ── Bottom controls ─────────────────────────────────────────
                 let snap = self.state.lock().unwrap().clone();
-                let pause_controls_disabled = snap.exiting_manual_mode;
+                let pause_controls_disabled = snap.exiting_manual_mode || snap.transitioning_to_all_red || snap.all_red_after_blinking || snap.need_yellow_before_all_red;
 
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
@@ -1106,6 +1166,8 @@ impl eframe::App for TrafficLightApp {
                                     // Disable manual control: set flag to exit manual mode after reaching all red
                                     s.manual_control_enabled = false;
                                     s.exiting_manual_mode = true;
+                                    // Ensure simulation is not paused so it can continue
+                                    s.paused = false;
 
                                     // Set current green light to blinking state
                                     if s.traffic_light.sig_ped.0 == TrafficSign::Green {
@@ -1119,6 +1181,7 @@ impl eframe::App for TrafficLightApp {
                                 } else {
                                     // Enable manual control: pause the simulation at current state
                                     s.manual_control_enabled = true;
+                                    s.paused = true;
                                     s.countdown = 0.0;
                                 }
                             }
@@ -1160,8 +1223,7 @@ impl eframe::App for TrafficLightApp {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             let all_red_enabled = snap.all_red_hold_enabled;
-                            let maint_enabled = snap.maintenance_mode_enabled;
-                            let modes_transitioning = snap.transitioning_to_all_red || snap.transitioning_to_maintenance;
+                            let modes_transitioning = snap.transitioning_to_all_red || snap.all_red_after_blinking;
 
                             // All Red button
                             let (all_red_lbl, all_red_fill, all_red_text_col) = if modes_transitioning {
@@ -1176,68 +1238,76 @@ impl eframe::App for TrafficLightApp {
                             )
                             .fill(all_red_fill)
                             .min_size(Vec2::new(130.0, 32.0));
-                            let all_red_response = ui.add_enabled(!modes_transitioning && !maint_enabled, all_red_btn);
-                            if !modes_transitioning && !maint_enabled && all_red_response.clicked() {
+                            let all_red_response = ui.add_enabled(!modes_transitioning, all_red_btn);
+                            if !modes_transitioning && all_red_response.clicked() {
                                 let mut s = self.state.lock().unwrap();
                                 if s.all_red_hold_enabled {
                                     // Turn off all red, continue auto cycle
                                     s.all_red_hold_enabled = false;
+                                    // Automatically resume simulation
+                                    s.paused = false;
                                     // Reset to all red state so auto cycle continues
                                     s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Solid);
                                     s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
+                                    // Reset blinking flags to avoid duplicate blinking on next cycle
+                                    s.ped_blinking = false;
+                                    s.veh_blinking = false;
+                                    s.all_red_after_blinking = false;
+                                    s.need_yellow_before_all_red = false;
                                 } else {
-                                    // Activate all red hold
-                                    s.transitioning_to_all_red = true;
-                                    // Start green blinking if currently green
-                                    if s.traffic_light.sig_ped.0 == TrafficSign::Green {
-                                        s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
-                                        s.ped_blinking = true;
+                                    // Exit manual mode if in manual mode, and allow transition to run
+                                    if s.manual_control_enabled {
+                                        s.manual_control_enabled = false;
                                     }
-                                    if s.traffic_light.sig_veh.0 == TrafficSign::Green {
-                                        s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
-                                        s.veh_blinking = true;
+                                    s.paused = false;
+
+                                    // Reset transition helper flags before applying one deterministic path.
+                                    s.all_red_after_blinking = false;
+                                    s.need_yellow_before_all_red = false;
+
+                                    match s.phase {
+                                        // 1 & 2. Ped green solid / extension solid -> immediate ped blinking -> all red.
+                                        Phase::PedestrianGreen | Phase::PedestrianGreenExtension => {
+                                            if s.ped_blinking {
+                                                // 3. Already in ped blinking -> wait blinking end -> all red.
+                                                s.all_red_after_blinking = true;
+                                            } else {
+                                                s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
+                                                s.ped_blinking = true;
+                                                s.countdown = config::PED_GREEN_BLINKING;
+                                                s.all_red_after_blinking = true;
+                                                s.skip_phase = true;
+                                            }
+                                        }
+
+                                        // 5 & 6. Vehicle green solid / blinking -> blinking then yellow then all red.
+                                        Phase::VehicleGreen => {
+                                            s.need_yellow_before_all_red = true;
+                                            if s.veh_blinking {
+                                                s.all_red_after_blinking = true;
+                                            } else {
+                                                s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
+                                                s.veh_blinking = true;
+                                                s.countdown = config::VEH_GREEN_BLINKING;
+                                                s.all_red_after_blinking = true;
+                                                s.skip_phase = true;
+                                            }
+                                        }
+
+                                        // During yellow, finish yellow then go all red.
+                                        Phase::VehicleYellow => {
+                                            s.need_yellow_before_all_red = true;
+                                        }
+
+                                        // 4 & 7. Already in all-red state -> keep all red hold.
+                                        Phase::AllRedBeforeVehicle | Phase::AllRedBeforePedestrian => {
+                                            s.all_red_hold_enabled = true;
+                                        }
                                     }
                                 }
                             }
 
                             ui.add_space(12.0);
-
-                            // Maintenance mode button
-                            let (maint_lbl, maint_fill, maint_text_col) = if modes_transitioning {
-                                ("Maint...", Color32::from_rgb(100, 100, 120), Color32::from_rgb(100, 100, 120))
-                            } else if maint_enabled {
-                                ("● Maintenance ON", Color32::from_rgb(180, 100, 60), Color32::WHITE)
-                            } else {
-                                ("○ Maintenance OFF", Color32::from_rgb(50, 50, 68), Color32::WHITE)
-                            };
-                            let maint_btn = egui::Button::new(
-                                egui::RichText::new(maint_lbl).size(13.0).color(maint_text_col),
-                            )
-                            .fill(maint_fill)
-                            .min_size(Vec2::new(155.0, 32.0));
-                            let maint_response = ui.add_enabled(!modes_transitioning && !all_red_enabled, maint_btn);
-                            if !modes_transitioning && !all_red_enabled && maint_response.clicked() {
-                                let mut s = self.state.lock().unwrap();
-                                if s.maintenance_mode_enabled {
-                                    // Enter all red, then start auto cycle
-                                    s.maintenance_mode_enabled = false;
-                                    s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Red, LightState::Solid);
-                                    s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Red, LightState::Solid);
-                                    s.veh_blinking = false;
-                                } else {
-                                    // Activate maintenance mode
-                                    s.transitioning_to_maintenance = true;
-                                    // Start green blinking if currently green
-                                    if s.traffic_light.sig_ped.0 == TrafficSign::Green {
-                                        s.traffic_light.set_sig(TrafficLightPosition::Ped1, TrafficSign::Green, LightState::Blinking);
-                                        s.ped_blinking = true;
-                                    }
-                                    if s.traffic_light.sig_veh.0 == TrafficSign::Green {
-                                        s.traffic_light.set_sig(TrafficLightPosition::Veh1, TrafficSign::Green, LightState::Blinking);
-                                        s.veh_blinking = true;
-                                    }
-                                }
-                            }
                         });
                     });
                 });
