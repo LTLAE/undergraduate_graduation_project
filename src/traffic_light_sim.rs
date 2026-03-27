@@ -2,7 +2,7 @@
 // traffic_light_sim.rs — Traffic light simulation UI
 // Uses egui/eframe for rendering; simulation loop runs on a background thread.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use eframe::egui;
 use egui::{Color32, Pos2, Stroke, Vec2};
@@ -720,10 +720,25 @@ struct TrafficLightApp {
     veh_img_path: Option<String>,
     /// Latest YOLO detection status
     yolo_msg: Option<String>,
+    /// Available camera devices
+    camera_devices: Vec<(usize, String)>,
+    /// Selected camera index
+    selected_camera: usize,
+    /// Last captured camera image path
+    camera_img_path: Option<String>,
+    /// Cached dimensions for the latest captured image
+    camera_img_dimensions: Option<(u32, u32)>,
+    /// Currently previewing image (full-screen modal)
+    preview_image_path: Option<String>,
+    /// Background capture task receiver
+    camera_capture_rx: Option<mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    /// Whether a photo capture is currently in progress
+    camera_capture_in_progress: bool,
 }
 
 impl TrafficLightApp {
     fn new(state: Arc<Mutex<SimState>>) -> Self {
+        let camera_devices = crate::camera::get_camera_devices();
         Self {
             state,
             ui_ped_text: String::new(),
@@ -733,6 +748,63 @@ impl TrafficLightApp {
             ped_img_path: None,
             veh_img_path: None,
             yolo_msg: None,
+            camera_devices,
+            selected_camera: 0,
+            camera_img_path: None,
+            camera_img_dimensions: None,
+            preview_image_path: None,
+            camera_capture_rx: None,
+            camera_capture_in_progress: false,
+        }
+    }
+
+    fn selected_camera_id(&self) -> usize {
+        self.camera_devices
+            .get(self.selected_camera)
+            .map(|(camera_id, _)| *camera_id)
+            .unwrap_or(0)
+    }
+
+    fn refresh_camera_devices(&mut self) {
+        let previous_camera_id = self.selected_camera_id();
+        self.camera_devices = crate::camera::get_camera_devices();
+        self.selected_camera = self
+            .camera_devices
+            .iter()
+            .position(|(camera_id, _)| *camera_id == previous_camera_id)
+            .unwrap_or(0);
+    }
+
+    fn poll_camera_capture(&mut self) {
+        let Some(rx) = self.camera_capture_rx.take() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.camera_capture_in_progress = false;
+                match result {
+                    Ok(path) => {
+                        let path_str = path.to_string_lossy().into_owned();
+                        self.camera_img_dimensions = crate::camera::get_image_dimensions(&path_str).ok();
+                        self.ped_img_path = Some(path_str.clone());
+                        self.camera_img_path = Some(path_str);
+                        self.yolo_msg = Some("Photo captured successfully! Use detection buttons above.".to_string());
+                    }
+                    Err(err) => {
+                        self.camera_img_dimensions = None;
+                        self.yolo_msg = Some(format!("Capture failed: {}", err));
+                    }
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.camera_capture_rx = Some(rx);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.camera_capture_in_progress = false;
+                self.camera_img_dimensions = None;
+                self.yolo_msg = Some("Capture failed: background task disconnected".to_string());
+            }
         }
     }
 }
@@ -740,6 +812,68 @@ impl TrafficLightApp {
 impl eframe::App for TrafficLightApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(50));
+        self.poll_camera_capture();
+
+        // ── Image Preview Modal ──────────────────────────────────────────
+        if let Some(ref img_path) = self.preview_image_path.clone() {
+            let mut is_open = true;
+            egui::Window::new("📷 Image Preview")
+                .open(&mut is_open)
+                .resizable(true)
+                .collapsible(false)
+                .vscroll(true)
+                .hscroll(true)
+                .default_width(600.0)
+                .default_height(500.0)
+                .show(ctx, |ui| {
+                    let file_name = Path::new(img_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(img_path);
+                    let dims = self.camera_img_dimensions;
+
+                    ui.label(
+                        egui::RichText::new(format!("Captured: {}", file_name))
+                            .size(12.0)
+                            .color(Color32::LIGHT_GRAY),
+                    );
+                    ui.add_space(8.0);
+
+                    if let Some((width, height)) = dims {
+                        let max_width = 550.0;
+                        let max_height = 450.0;
+                        let (w, h) = (width as f32, height as f32);
+                        let scale = (max_width / w).min(max_height / h).min(1.0);
+                        let display_width = w * scale;
+                        let display_height = h * scale;
+
+                        ui.label(
+                            egui::RichText::new(format!("Resolution: {}x{}", width, height))
+                                .size(11.0)
+                                .color(Color32::DARK_GRAY),
+                        );
+                        ui.add_space(12.0);
+
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(display_width, display_height),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter_at(rect)
+                            .rect_filled(rect, 4.0, Color32::from_rgb(60, 90, 140));
+                        ui.label(
+                            egui::RichText::new("Image preview placeholder (metadata only)")
+                                .size(10.0)
+                                .color(Color32::DARK_GRAY),
+                        );
+                    } else {
+                        ui.label("Image captured, but preview metadata is unavailable");
+                    }
+                });
+
+            if !is_open {
+                self.preview_image_path = None;
+            }
+        }
 
         let snap = self.state.lock().unwrap().clone();
 
@@ -1037,6 +1171,194 @@ impl eframe::App for TrafficLightApp {
                                             }
                                             if let Some(path) = &self.veh_img_path {
                                                 ui.label(egui::RichText::new(Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path)).size(11.0).color(Color32::DARK_GRAY));
+                                            }
+                                        });
+                                    });
+                                });
+
+                            ui.add_space(10.0);
+
+                            egui::Frame::default()
+                                .fill(Color32::from_rgb(20, 24, 32))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::same(12))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(55, 55, 90)))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("📷 Camera Module")
+                                            .size(14.0)
+                                            .color(Color32::LIGHT_GRAY)
+                                            .strong(),
+                                    );
+                                    ui.add_space(8.0);
+
+                                    ui.horizontal_top(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.set_min_width(230.0);
+                                            ui.label(
+                                                egui::RichText::new("Select Camera:")
+                                                    .size(12.0)
+                                                    .color(Color32::LIGHT_GRAY),
+                                            );
+
+                                            let mut device_labels: Vec<String> = self
+                                                .camera_devices
+                                                .iter()
+                                                .map(|(_, label)| label.clone())
+                                                .collect();
+                                            if device_labels.is_empty() {
+                                                device_labels.push("No camera found".to_string());
+                                            }
+
+                                            let selected_label = device_labels
+                                                .get(self.selected_camera)
+                                                .cloned()
+                                                .unwrap_or_else(|| "No camera found".to_string());
+                                            let mut selected = self.selected_camera;
+
+                                            ui.horizontal(|ui| {
+                                                egui::ComboBox::from_label("")
+                                                    .selected_text(&selected_label)
+                                                    .show_ui(ui, |ui| {
+                                                        for (idx, label) in device_labels.iter().enumerate() {
+                                                            ui.selectable_value(&mut selected, idx, label);
+                                                        }
+                                                    });
+
+                                                let refresh_btn = egui::Button::new("🔄 Refresh")
+                                                    .min_size(Vec2::new(92.0, 28.0));
+                                                if ui.add(refresh_btn).clicked() {
+                                                    self.refresh_camera_devices();
+                                                    let device_count = self.camera_devices.len();
+                                                    self.yolo_msg = Some(format!(
+                                                        "Camera list refreshed: {} device(s) available",
+                                                        device_count
+                                                    ));
+                                                } else {
+                                                    self.selected_camera = selected;
+                                                }
+                                            });
+
+                                            ui.add_space(12.0);
+
+                                            let capture_btn = egui::Button::new(
+                                                egui::RichText::new("📸 Capture Photo")
+                                                    .size(13.0)
+                                                    .color(Color32::WHITE),
+                                            )
+                                            .fill(Color32::from_rgb(100, 150, 200))
+                                            .min_size(Vec2::new(150.0, 32.0));
+
+                                            if ui
+                                                .add_enabled(!self.camera_capture_in_progress, capture_btn)
+                                                .clicked()
+                                            {
+                                                let camera_id = self.selected_camera_id();
+                                                let (tx, rx) = mpsc::channel();
+                                                self.camera_capture_rx = Some(rx);
+                                                self.camera_capture_in_progress = true;
+                                                self.yolo_msg = Some(format!(
+                                                    "Capturing photo from Camera {}...",
+                                                    camera_id
+                                                ));
+
+                                                std::thread::spawn(move || {
+                                                    let result = crate::camera::capture_frame(camera_id)
+                                                        .map_err(|err| err.to_string());
+                                                    let _ = tx.send(result);
+                                                });
+                                            }
+
+                                            if self.camera_capture_in_progress {
+                                                ui.add_space(6.0);
+                                                ui.label(
+                                                    egui::RichText::new("Capturing photo in background...")
+                                                        .size(11.0)
+                                                        .color(Color32::YELLOW),
+                                                );
+                                            }
+                                        });
+
+                                        ui.add_space(20.0);
+
+                                        ui.vertical(|ui| {
+                                            ui.set_min_width(180.0);
+                                            ui.label(
+                                                egui::RichText::new("📷 Preview")
+                                                    .size(12.0)
+                                                    .color(Color32::LIGHT_GRAY),
+                                            );
+                                            ui.add_space(4.0);
+
+                                            if let Some(ref img_path) = self.camera_img_path {
+                                                let width = 150.0;
+                                                let height = 110.0;
+                                                let (rect, response) = ui.allocate_exact_size(
+                                                    Vec2::new(width, height),
+                                                    egui::Sense::click(),
+                                                );
+
+                                                let painter = ui.painter_at(rect);
+                                                painter.rect_stroke(
+                                                    rect,
+                                                    egui::CornerRadius::same(4),
+                                                    Stroke::new(2.0, Color32::from_rgb(100, 150, 200)),
+                                                    egui::StrokeKind::Outside,
+                                                );
+                                                painter.rect_filled(
+                                                    rect,
+                                                    egui::CornerRadius::same(4),
+                                                    Color32::from_rgb(50, 80, 120),
+                                                );
+
+                                                if response.hovered() {
+                                                    ui.ctx().output_mut(|o| {
+                                                        o.cursor_icon = egui::CursorIcon::PointingHand;
+                                                    });
+                                                }
+
+                                                if response.clicked() {
+                                                    self.preview_image_path = Some(img_path.clone());
+                                                }
+
+                                                let file_name = Path::new(img_path)
+                                                    .file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .unwrap_or(img_path);
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    egui::RichText::new(file_name)
+                                                        .size(10.0)
+                                                        .color(Color32::from_rgb(100, 200, 100)),
+                                                );
+                                                if let Some((img_w, img_h)) = self.camera_img_dimensions {
+                                                    ui.label(
+                                                        egui::RichText::new(format!("{}x{}", img_w, img_h))
+                                                            .size(10.0)
+                                                            .color(Color32::DARK_GRAY),
+                                                    );
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new("Click to view preview details")
+                                                        .size(10.0)
+                                                        .color(Color32::DARK_GRAY),
+                                                );
+                                            } else {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    Vec2::new(150.0, 110.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter_at(rect).rect_filled(
+                                                    rect,
+                                                    egui::CornerRadius::same(4),
+                                                    Color32::from_rgb(35, 42, 58),
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    egui::RichText::new("No captured photo yet")
+                                                        .size(10.0)
+                                                        .color(Color32::DARK_GRAY),
+                                                );
                                             }
                                         });
                                     });
