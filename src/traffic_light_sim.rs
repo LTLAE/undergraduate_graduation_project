@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use eframe::egui;
-use egui::{Color32, Pos2, Stroke, Vec2};
+use egui::{Color32, Pos2, Stroke, Vec2, Rect};
 use crate::config;
 use crate::traffic_light::{TrafficSign, TrafficLight, LightState, TrafficLightPosition};
 use crate::fuzzy_inference::{get_extension_time};
@@ -854,17 +854,45 @@ impl eframe::App for TrafficLightApp {
                         );
                         ui.add_space(12.0);
 
-                        let (rect, _) = ui.allocate_exact_size(
-                            Vec2::new(display_width, display_height),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter_at(rect)
-                            .rect_filled(rect, 4.0, Color32::from_rgb(60, 90, 140));
-                        ui.label(
-                            egui::RichText::new("Image preview placeholder (metadata only)")
-                                .size(10.0)
-                                .color(Color32::DARK_GRAY),
-                        );
+                        // Try to load and display the actual image
+                        match image::open(img_path) {
+                            Ok(img) => {
+                                let rgb_img = img.to_rgb8();
+                                let pixels: Vec<Color32> = rgb_img
+                                    .pixels()
+                                    .map(|p| Color32::from_rgb(p[0], p[1], p[2]))
+                                    .collect();
+
+                                let color_image = egui::ColorImage {
+                                    size: [width as usize, height as usize],
+                                    pixels,
+                                };
+
+                                let texture = ctx.load_texture(
+                                    "preview_image",
+                                    color_image,
+                                    Default::default(),
+                                );
+
+                                ui.image(egui::load::SizedTexture::new(
+                                    texture.id(),
+                                    Vec2::new(display_width, display_height),
+                                ));
+                            }
+                            Err(e) => {
+                                ui.label(
+                                    egui::RichText::new(format!("Failed to load image: {}", e))
+                                        .size(11.0)
+                                        .color(Color32::RED),
+                                );
+                                let (rect, _) = ui.allocate_exact_size(
+                                    Vec2::new(display_width, display_height),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter_at(rect)
+                                    .rect_filled(rect, 4.0, Color32::from_rgb(60, 90, 140));
+                            }
+                        }
                     } else {
                         ui.label("Image captured, but preview metadata is unavailable");
                     }
@@ -1298,18 +1326,79 @@ impl eframe::App for TrafficLightApp {
                                                     egui::Sense::click(),
                                                 );
 
-                                                let painter = ui.painter_at(rect);
-                                                painter.rect_stroke(
-                                                    rect,
-                                                    egui::CornerRadius::same(4),
-                                                    Stroke::new(2.0, Color32::from_rgb(100, 150, 200)),
-                                                    egui::StrokeKind::Outside,
-                                                );
-                                                painter.rect_filled(
-                                                    rect,
-                                                    egui::CornerRadius::same(4),
-                                                    Color32::from_rgb(50, 80, 120),
-                                                );
+                                                // Try to load and display the actual image thumbnail
+                                                match image::open(img_path) {
+                                                    Ok(img) => {
+                                                        // Scale image to fit in the preview area
+                                                        let img_w = img.width() as f32;
+                                                        let img_h = img.height() as f32;
+                                                        let scale = (width / img_w).min(height / img_h).min(1.0);
+                                                        let display_w = img_w * scale;
+                                                        let display_h = img_h * scale;
+
+                                                        // Convert image to RGB pixels
+                                                        let rgb_img = img.to_rgb8();
+                                                        let pixels: Vec<Color32> = rgb_img
+                                                            .pixels()
+                                                            .map(|p| Color32::from_rgb(p[0], p[1], p[2]))
+                                                            .collect();
+
+                                                        let color_image = egui::ColorImage {
+                                                            size: [img.width() as usize, img.height() as usize],
+                                                            pixels,
+                                                        };
+
+                                                        let texture = ctx.load_texture(
+                                                            "camera_preview_thumb",
+                                                            color_image,
+                                                            Default::default(),
+                                                        );
+
+                                                        // Draw border and background
+                                                        let painter = ui.painter_at(rect);
+                                                        painter.rect_filled(
+                                                            rect,
+                                                            egui::CornerRadius::same(4),
+                                                            Color32::from_rgb(50, 80, 120),
+                                                        );
+                                                        painter.rect_stroke(
+                                                            rect,
+                                                            egui::CornerRadius::same(4),
+                                                            Stroke::new(2.0, Color32::from_rgb(100, 150, 200)),
+                                                            egui::StrokeKind::Outside,
+                                                        );
+
+                                                        // Center the image within the preview box
+                                                        let center_x = rect.center().x;
+                                                        let center_y = rect.center().y;
+                                                        let image_rect = egui::Rect {
+                                                            min: Pos2::new(center_x - display_w / 2.0, center_y - display_h / 2.0),
+                                                            max: Pos2::new(center_x + display_w / 2.0, center_y + display_h / 2.0),
+                                                        };
+
+                                                        ui.painter_at(image_rect).image(
+                                                            texture.id(),
+                                                            image_rect,
+                                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                                            Color32::WHITE,
+                                                        );
+                                                    }
+                                                    Err(_) => {
+                                                        // Fallback if image loading fails
+                                                        let painter = ui.painter_at(rect);
+                                                        painter.rect_filled(
+                                                            rect,
+                                                            egui::CornerRadius::same(4),
+                                                            Color32::from_rgb(50, 80, 120),
+                                                        );
+                                                        painter.rect_stroke(
+                                                            rect,
+                                                            egui::CornerRadius::same(4),
+                                                            Stroke::new(2.0, Color32::from_rgb(100, 150, 200)),
+                                                            egui::StrokeKind::Outside,
+                                                        );
+                                                    }
+                                                }
 
                                                 if response.hovered() {
                                                     ui.ctx().output_mut(|o| {
