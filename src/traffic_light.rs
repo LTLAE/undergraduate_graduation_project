@@ -31,6 +31,7 @@ pub struct TrafficLight {
 impl TrafficLight {
     // Sets the signal color and state
     pub fn set_sig(&mut self, sig_pos: TrafficLightPosition, next_sign: TrafficSign, next_state: LightState) {
+        println!("Changing {:?} signal to {:?} ({:?})", sig_pos, next_sign, next_state);
         match sig_pos {
             TrafficLightPosition::Ped1 => {
                 // since ped have no yellow light, raise error when trying to do so
@@ -45,6 +46,9 @@ impl TrafficLight {
         }
     }
 
+
+    // Codes below are instance, not actually working in traffic_light_sim
+    // These instance demonstrate the workflow of traffic light changing
     // I am thinking something like a graphic drive
     // Program would not stop changing the light status, and when it is the time, show it to the screen
     // After changing, we call something like display() and light the light (hhh)
