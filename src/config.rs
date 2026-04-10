@@ -16,3 +16,11 @@ pub const ALL_RED: f64 = 3.0;
 
 // Weight of Extend Time and Historical avg Extend Time from DB
 pub const CURRENT_EXTEND_TIME_WEIGHT: f64 = 0.6;    // 0.6 current 0.4 historical
+
+// Database configuration
+pub const SQL_FILE_LOCATION: &str = "./sqheavy/db.sqlite";
+
+// Python and ML model configuration
+pub const PYTHON_VENV_SITE_PACKAGES: &str = "python/.venv/lib/python3.9/site-packages";
+pub const PYTHON_DIR: &str = "python";
+pub const YOLO_MODEL_PATH: &str = "models/yolov8n.pt";

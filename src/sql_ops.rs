@@ -2,6 +2,7 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use std::fs;
 use rusqlite::Connection;
+use crate::config::SQL_FILE_LOCATION;
 
 // sqlite but sqheavy, need a tutorial of understand what Tails doing
 // Like we are hanging out and making perler beads, we talked about topics from the sky to the underground
@@ -14,15 +15,14 @@ use rusqlite::Connection;
 // If they asked about it, I would explain in this way, yolo, have fun
 // Not that YOLO, but sure, we are using YOLO for object detection, huh
 // I guess if they are not familiar with English and just take a glance they would consider this essay a description of the file or something, but when they take a closer look it would be rickroll
-const SQL_FILE_LOCATION: &str = "./sqheavy/db.sqlite";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SQLError {
     InvalidTable(String),
     EmptyFuzzyResult,
     ReadInitFileFailed(String),
     DBConnectionFailed,
-    ExecutionFailed(rusqlite::Error),
+    ExecutionFailed(String),  // Changed from rusqlite::Error to String for Clone support
 }
 
 impl std::fmt::Display for SQLError {
@@ -52,7 +52,7 @@ pub fn init_sqlite_db(where_is_init_dot_sql: &str) -> Result<(), SQLError> {
     // do init.sql
     match conn.execute_batch(&init_sql_content) {
         Ok(_) => Ok(()),
-        Err(e) => Err(SQLError::ExecutionFailed(e)),
+        Err(e) => Err(SQLError::ExecutionFailed(e.to_string())),
     }
 }
 
@@ -85,7 +85,7 @@ pub fn insert(table: &str, obj_count:&str) -> Result<(), SQLError> {
 
     conn.execute(&sql, rusqlite::params![obj_count, time_now])
         .map(|_| ())
-        .map_err(SQLError::ExecutionFailed)
+        .map_err(|e| SQLError::ExecutionFailed(e.to_string()))
 }
 
 // get average object count
@@ -134,7 +134,7 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
         let (center_rowid, center_count, _center_created_at) = match closest {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => continue, // no data for this day anchor
-            Err(e) => return Err(SQLError::ExecutionFailed(e)),
+            Err(e) => return Err(SQLError::ExecutionFailed(e.to_string())),
         };
 
         // 2. Find 1 prev and 1 after record
@@ -155,7 +155,7 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
         ) {
             Ok(v) => Some(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(SQLError::ExecutionFailed(e)),
+            Err(e) => return Err(SQLError::ExecutionFailed(e.to_string())),
         };
 
         let next_count: Option<i32> = match conn.query_row(
@@ -165,7 +165,7 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
         ) {
             Ok(v) => Some(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(SQLError::ExecutionFailed(e)),
+            Err(e) => return Err(SQLError::ExecutionFailed(e.to_string())),
         };
 
         // 3. cal day avg
@@ -218,7 +218,7 @@ fn cleanup(conn: &Connection) -> Result<(), SQLError> {
         let sql = format!("DELETE FROM {} WHERE timestamp < ?1", table);
         match conn.execute(&sql, rusqlite::params![seven_days_ago_timestamp]) {
             Ok(_) => (),
-            Err(e) => return Err(SQLError::ExecutionFailed(e)),
+            Err(e) => return Err(SQLError::ExecutionFailed(e.to_string())),
         }
     }
 

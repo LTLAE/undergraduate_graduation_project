@@ -1,6 +1,8 @@
 from ultralytics import YOLO
 
-model = YOLO('models/yolov8n.pt')
+# Model path can be set from Rust, otherwise use default
+model_path = 'models/yolov8n.pt'
+model = YOLO(model_path)
 
 CONFIDENCE: float = 0.25
 IOU: float = 0.45
