@@ -1,4 +1,5 @@
 // camera.rs — Camera capture and image handling module
+// Mostly build by ChatGPT or Claude Haiku & GitHub Copilot
 
 use std::path::PathBuf;
 use std::process::Command;
