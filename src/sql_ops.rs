@@ -68,21 +68,22 @@ fn disconnect(connection: Connection) -> bool {
 // table: vehicle_fuzzy_results / pedestrian_fuzzy_results
 const TABLE_LIST: [&str; 2] = ["vehicle_fuzzy_results", "pedestrian_fuzzy_results"];
 // fuzzy_result: recommended but not restricted, LOW / MEDIUM / HIGH
-pub fn insert(table: &str, fuzzy_result :&str) -> Result<(), SQLError> {
+pub fn insert(table: &str, obj_count:&str) -> Result<(), SQLError> {
+    println!("Try inserting into table: {}, fuzzy_result: {}", table, obj_count);
     // table MUST whitelist, fuzzy_result not empty
     if !TABLE_LIST.contains(&table) {
         return Err(SQLError::InvalidTable(table.to_string()));
     }
-    if fuzzy_result.is_empty() {
+    if obj_count.is_empty() {
         return Err(SQLError::EmptyFuzzyResult);
     }
     // connect to db
     let conn = init_connection(SQL_FILE_LOCATION)?;
     // INSERT INTO table <fuzzy_result> VALUES <fuzzy_result>;
-    let sql: String = format!("INSERT INTO {} (fuzzy_result, created_at) VALUES (?1, ?2)", table);
+    let sql: String = format!("INSERT INTO {} (obj_count, timestamp) VALUES (?1, ?2)", table);
     let time_now: i64 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
-    conn.execute(&sql, rusqlite::params![fuzzy_result, time_now])
+    conn.execute(&sql, rusqlite::params![obj_count, time_now])
         .map(|_| ())
         .map_err(SQLError::ExecutionFailed)
 }
@@ -92,6 +93,7 @@ pub fn insert(table: &str, fuzzy_result :&str) -> Result<(), SQLError> {
 // repeat this for 7 times and get 7 days' avg, then avg them to get a final result
 // the final result will be sent to fuzzy_inference
 pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
+    println!("Try getting average object count from table: {}", table);
     // table MUST whitelist
     if !TABLE_LIST.contains(&table) {
         return Err(SQLError::InvalidTable(table.to_string()));
@@ -116,9 +118,9 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
 
         // 1. Find the single record whose created_at is closest to target_timestamp
         let closest_sql = format!(
-            "SELECT rowid, object_count, created_at
+            "SELECT rowid, obj_count, timestamp
              FROM {}
-             ORDER BY ABS(created_at - ?1) ASC
+             ORDER BY ABS(timestamp - ?1) ASC
              LIMIT 1",
             table
         );
@@ -137,11 +139,11 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
 
         // 2. Find 1 prev and 1 after record
         let prev_sql = format!(
-            "SELECT object_count FROM {} WHERE rowid < ?1 ORDER BY rowid DESC LIMIT 1",
+            "SELECT obj_count FROM {} WHERE rowid < ?1 ORDER BY rowid DESC LIMIT 1",
             table
         );
         let next_sql = format!(
-            "SELECT object_count FROM {} WHERE rowid > ?1 ORDER BY rowid ASC LIMIT 1",
+            "SELECT obj_count FROM {} WHERE rowid > ?1 ORDER BY rowid ASC LIMIT 1",
             table
         );
 
@@ -202,6 +204,7 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
 // Clear old records, keep only the latest 7 days' data, run once an hour
 static LAST_CLEANUP: Lazy<Mutex<std::time::SystemTime>> = Lazy::new(|| Mutex::new(std::time::SystemTime::now()));
 fn cleanup(conn: &Connection) -> Result<(), SQLError> {
+    println!("Try cleaning up old records");
     let now = std::time::SystemTime::now();
     let mut last_cleanup = LAST_CLEANUP.lock().unwrap();
     if now.duration_since(*last_cleanup).unwrap_or_default().as_secs() < 3600 {
@@ -212,7 +215,7 @@ fn cleanup(conn: &Connection) -> Result<(), SQLError> {
     let seven_days_ago_timestamp = seven_days_ago.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
     for table in &TABLE_LIST {
-        let sql = format!("DELETE FROM {} WHERE created_at < ?1", table);
+        let sql = format!("DELETE FROM {} WHERE timestamp < ?1", table);
         match conn.execute(&sql, rusqlite::params![seven_days_ago_timestamp]) {
             Ok(_) => (),
             Err(e) => return Err(SQLError::ExecutionFailed(e)),
