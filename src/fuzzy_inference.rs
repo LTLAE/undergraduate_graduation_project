@@ -107,21 +107,38 @@ fn run_fuzzy_inference(ped_count: i32, veh_count: i32) -> f64 {
 /// Public entry point: current i32 ped count + current i32 veh count -> f64 extend time
 pub fn get_extension_time(ped_count: i32, veh_count: i32) -> f64 {
     let current_ext_time = run_fuzzy_inference(ped_count, veh_count);
+    println!("Current Ped: {:?}, Veh: {:?}, Fuzzy result: {:?} seconds", ped_count, veh_count, current_ext_time);
 
     // Get 7d avg form db, is any err, return 0.0 and use current only
-    let historical_ext_time: f64 = match (
-        get_avg_obj_count("pedestrian_fuzzy_results"),
-        get_avg_obj_count("vehicle_fuzzy_results"),
-    ) {
+    let ped_avg_result = get_avg_obj_count("pedestrian_fuzzy_results");
+    let veh_avg_result = get_avg_obj_count("vehicle_fuzzy_results");
+    // clone them for printing
+    let ped_avg_result4print = ped_avg_result.clone();
+    let veh_avg_result4print = veh_avg_result.clone();
+
+    let historical_ext_time: f64 = match (ped_avg_result, veh_avg_result) {
         (Ok(ped_avg), Ok(veh_avg))
         if ped_avg > 0 || veh_avg > 0 => {
             // Reuse fuzzy inference on historical averages to derive a historical extension.
             // return like an inline fn
             run_fuzzy_inference(ped_avg.max(0), veh_avg.max(0))
         }
-        // except any exception as _, return 0.0
+        (Err(e), Ok(_)) => {
+            eprintln!("Failed to query pedestrian history from database: {}", e);
+            0.0
+        }
+        (Ok(_), Err(e)) => {
+            eprintln!("Failed to query vehicle history from database: {}", e);
+            0.0
+        }
+        (Err(ped_err), Err(veh_err)) => {
+            eprintln!("Failed to query pedestrian history from database: {}", ped_err);
+            eprintln!("Failed to query vehicle history from database: {}", veh_err);
+            0.0
+        }
         _ => 0.0,
     };
+    println!("Historical avg Ped: {:?}, Veh: {:?}, Fuzzy result: {:?} seconds", ped_avg_result4print, &veh_avg_result4print, historical_ext_time);
 
     if historical_ext_time == 0.0 {
         /*return*/ current_ext_time
