@@ -36,7 +36,7 @@ impl std::fmt::Display for SQLError {
         }
     }
 }
-pub fn init_sqlite_db(where_is_init_dot_sql: &str) -> Result<(), SQLError> {
+pub(crate) fn init_sqlite_db(where_is_init_dot_sql: &str) -> Result<(), SQLError> {
     // read init.sql
     let init_sql_content = match fs::read_to_string(where_is_init_dot_sql) {
         Ok(content) => content,
@@ -60,21 +60,17 @@ fn init_connection(where_is_db_file: &str) -> Result<Connection, SQLError> {
     Connection::open(where_is_db_file).map_err(|_| SQLError::DBConnectionFailed)
 }
 
-fn disconnect(connection: Connection) -> bool {
-    drop(connection);
-    true
-}
-
-// table: vehicle_fuzzy_results / pedestrian_fuzzy_results
 const TABLE_LIST: [&str; 2] = ["vehicle_fuzzy_results", "pedestrian_fuzzy_results"];
-// fuzzy_result: recommended but not restricted, LOW / MEDIUM / HIGH
-pub fn insert(table: &str, obj_count:&str) -> Result<(), SQLError> {
-    println!("Try inserting into table: {}, fuzzy_result: {}", table, obj_count);
+const VEHICLE_TABLE: &str = "vehicle_fuzzy_results";
+const PEDESTRIAN_TABLE: &str = "pedestrian_fuzzy_results";
+
+fn insert_count(table: &str, obj_count: i32) -> Result<(), SQLError> {
+    println!("Try inserting into table: {}, obj_count: {}", table, obj_count);
     // table MUST whitelist, fuzzy_result not empty
     if !TABLE_LIST.contains(&table) {
         return Err(SQLError::InvalidTable(table.to_string()));
     }
-    if obj_count.is_empty() {
+    if obj_count < 0 {
         return Err(SQLError::EmptyFuzzyResult);
     }
     // connect to db
@@ -88,11 +84,19 @@ pub fn insert(table: &str, obj_count:&str) -> Result<(), SQLError> {
         .map_err(|e| SQLError::ExecutionFailed(e.to_string()))
 }
 
+pub(crate) fn insert_pedestrian_count(obj_count: i32) -> Result<(), SQLError> {
+    insert_count(PEDESTRIAN_TABLE, obj_count)
+}
+
+pub(crate) fn insert_vehicle_count(obj_count: i32) -> Result<(), SQLError> {
+    insert_count(VEHICLE_TABLE, obj_count)
+}
+
 // get average object count
 // how to do it: time - 24 hours, get the closest record with 1 before and 1 after, avg 3 as the result of the day
 // repeat this for 7 times and get 7 days' avg, then avg them to get a final result
 // the final result will be sent to fuzzy_inference
-pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
+fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
     println!("Try getting average object count from table: {}", table);
     // table MUST whitelist
     if !TABLE_LIST.contains(&table) {
@@ -199,6 +203,14 @@ pub fn get_avg_obj_count(table: &str) -> Result<i32, SQLError> {
     Ok(week_avg.round() as i32)
     // Different from c++, it would round to the nearest int, but not flooring
     // That was unexpected, we are feeling better with rust
+}
+
+pub(crate) fn get_avg_pedestrian_count() -> Result<i32, SQLError> {
+    get_avg_obj_count(PEDESTRIAN_TABLE)
+}
+
+pub(crate) fn get_avg_vehicle_count() -> Result<i32, SQLError> {
+    get_avg_obj_count(VEHICLE_TABLE)
 }
 
 // Clear old records, keep only the latest 7 days' data, run once an hour

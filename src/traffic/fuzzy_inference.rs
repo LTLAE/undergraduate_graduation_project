@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use crate::traffic::membership_fns::{FuzzyAction, FuzzyLabels};
 use crate::config::{T_MIN, T_MAX, STEP};
-use crate::traffic::sql_ops::get_avg_obj_count;
+use crate::traffic::sql_ops::{get_avg_pedestrian_count, get_avg_vehicle_count};
 
 fn get_element_membership_degree(   // 3.3.1
     exact_value: i32,
@@ -110,8 +110,8 @@ pub fn get_extension_time(ped_count: i32, veh_count: i32) -> f64 {
     println!("Current Ped: {:?}, Veh: {:?}, Fuzzy result: {:?} seconds", ped_count, veh_count, current_ext_time);
 
     // Get 7d avg form db, is any err, return 0.0 and use current only
-    let ped_avg_result = get_avg_obj_count("pedestrian_fuzzy_results");
-    let veh_avg_result = get_avg_obj_count("vehicle_fuzzy_results");
+    let ped_avg_result = get_avg_pedestrian_count();
+    let veh_avg_result = get_avg_vehicle_count();
     // clone them for printing
     let ped_avg_result4print = ped_avg_result.clone();
     let veh_avg_result4print = veh_avg_result.clone();

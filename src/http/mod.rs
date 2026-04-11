@@ -1,1 +1,1 @@
-pub mod public_enrty;
+pub mod public_entry;

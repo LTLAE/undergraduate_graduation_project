@@ -7,9 +7,8 @@ use std::time::Duration;
 use eframe::egui;
 use egui::{Color32, Pos2, Stroke, Vec2, Rect};
 use crate::config;
-use crate::traffic::traffic_light::{TrafficSign, TrafficLight, LightState, TrafficLightPosition};
-use crate::traffic::fuzzy_inference::{get_extension_time};
-use crate::traffic::call_py_yolo::{count_people, count_cars};
+use crate::http::public_entry::{calculate_extension_time, detect_cars, detect_people};
+use crate::traffic::{LightState, TrafficLight, TrafficLightPosition, TrafficSign};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -227,7 +226,7 @@ fn manual_sim_sleep(sim_secs: f64, state: &Arc<Mutex<SimState>>) {
 fn get_fuzzy_extension() -> f64 {
     // Use default counts (0, 0) for automatic cycle
     // In real deployment, this would pull from actual camera/sensor data
-    get_extension_time(0, 0)
+    calculate_extension_time(0, 0)
 }
 
 /// Transition to the next phase by executing full transition sequences.
@@ -1105,7 +1104,7 @@ impl eframe::App for TrafficLightApp {
                                                 match self.ui_ped_text.trim().parse::<i32>() {
                                                     Ok(ped_count) if ped_count >= 0 => {
                                                         let veh_count = self.ui_veh_text.trim().parse::<i32>().unwrap_or(0).max(0);
-                                                        let ext = get_extension_time(ped_count, veh_count);
+                                                        let ext = calculate_extension_time(ped_count, veh_count);
                                                         self.fuzzy_ped_result = Some(ext);
                                                         self.ped_err = None;
                                                         self.state.lock().unwrap().manual_ped_ext = Some(ext);
@@ -1150,7 +1149,7 @@ impl eframe::App for TrafficLightApp {
                                             let detect_btn = egui::Button::new("🔎 YOLO detect pedestrians").min_size(Vec2::new(180.0, 32.0));
                                             if ui.add(detect_btn).clicked() {
                                                 match self.ped_img_path.clone() {
-                                                    Some(p) => match count_people(&p) {
+                                                    Some(p) => match detect_people(&p) {
                                                         Ok(cnt) => {
                                                             self.ui_ped_text = cnt.to_string();
                                                             self.yolo_msg = Some(format!("Pedestrians detected: {}", cnt));
@@ -1183,7 +1182,7 @@ impl eframe::App for TrafficLightApp {
                                             let detect_btn = egui::Button::new("🔎 YOLO detect vehicles").min_size(Vec2::new(180.0, 32.0));
                                             if ui.add(detect_btn).clicked() {
                                                 match self.veh_img_path.clone() {
-                                                    Some(p) => match count_cars(&p) {
+                                                    Some(p) => match detect_cars(&p) {
                                                         Ok(cnt) => {
                                                             self.ui_veh_text = cnt.to_string();
                                                             self.yolo_msg = Some(format!("Vehicles detected: {}", cnt));
