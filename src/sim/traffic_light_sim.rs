@@ -7,9 +7,9 @@ use std::time::Duration;
 use eframe::egui;
 use egui::{Color32, Pos2, Stroke, Vec2, Rect};
 use crate::config;
-use crate::traffic_light::{TrafficSign, TrafficLight, LightState, TrafficLightPosition};
-use crate::fuzzy_inference::{get_extension_time};
-use crate::call_py_yolo::{count_people, count_cars};
+use crate::traffic::traffic_light::{TrafficSign, TrafficLight, LightState, TrafficLightPosition};
+use crate::traffic::fuzzy_inference::{get_extension_time};
+use crate::traffic::call_py_yolo::{count_people, count_cars};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -738,7 +738,7 @@ struct TrafficLightApp {
 
 impl TrafficLightApp {
     fn new(state: Arc<Mutex<SimState>>) -> Self {
-        let camera_devices = crate::camera::get_camera_devices();
+        let camera_devices = crate::sim::camera::get_camera_devices();
         Self {
             state,
             ui_ped_text: String::new(),
@@ -767,7 +767,7 @@ impl TrafficLightApp {
 
     fn refresh_camera_devices(&mut self) {
         let previous_camera_id = self.selected_camera_id();
-        self.camera_devices = crate::camera::get_camera_devices();
+        self.camera_devices = crate::sim::camera::get_camera_devices();
         self.selected_camera = self
             .camera_devices
             .iter()
@@ -786,7 +786,7 @@ impl TrafficLightApp {
                 match result {
                     Ok(path) => {
                         let path_str = path.to_string_lossy().into_owned();
-                        self.camera_img_dimensions = crate::camera::get_image_dimensions(&path_str).ok();
+                        self.camera_img_dimensions = crate::sim::camera::get_image_dimensions(&path_str).ok();
                         self.ped_img_path = Some(path_str.clone());
                         self.camera_img_path = Some(path_str);
                         self.yolo_msg = Some("Photo captured successfully! Use detection buttons above.".to_string());
@@ -1289,9 +1289,8 @@ impl eframe::App for TrafficLightApp {
                                                     "Capturing photo from Camera {}...",
                                                     camera_id
                                                 ));
-
                                                 std::thread::spawn(move || {
-                                                    let result = crate::camera::capture_frame(camera_id)
+                                                    let result = crate::sim::camera::capture_frame(camera_id)
                                                         .map_err(|err| err.to_string());
                                                     let _ = tx.send(result);
                                                 });
@@ -1754,8 +1753,8 @@ pub fn run() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Traffic Light Control System Simulation")
-            .with_inner_size([1280.0, 650.0])
-            .with_min_inner_size([1280.0, 650.0])
+            .with_inner_size([1280.0, 720.0])
+            .with_min_inner_size([1280.0, 720.0])
             .with_resizable(true),
         ..Default::default()
     };

@@ -23,8 +23,8 @@ pub enum TrafficLightPosition {
 
 #[derive(Clone)]
 pub struct TrafficLight {
-    pub sig_ped: (crate::traffic_light::TrafficSign, crate::traffic_light::LightState),
-    pub sig_veh: (crate::traffic_light::TrafficSign, crate::traffic_light::LightState),
+    pub sig_ped: (TrafficSign, LightState),
+    pub sig_veh: (TrafficSign, LightState),
     pub time: f64,
 }
 

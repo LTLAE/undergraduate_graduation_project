@@ -2,9 +2,9 @@
 // Fuzzy inference method: Mamdani
 // Exact pedestrian or vehicle count -> list of membership degrees
 use std::collections::HashMap;
-use crate::membership_fns::{FuzzyAction, FuzzyLabels};
+use crate::traffic::membership_fns::{FuzzyAction, FuzzyLabels};
 use crate::config::{T_MIN, T_MAX, STEP};
-use crate::sql_ops::get_avg_obj_count;
+use crate::traffic::sql_ops::get_avg_obj_count;
 
 fn get_element_membership_degree(   // 3.3.1
     exact_value: i32,
@@ -78,7 +78,7 @@ fn defuzzify(operation_membership_degrees: HashMap<FuzzyAction, f64>) -> f64 {
 // result: final green extension time in f64
 
 fn run_fuzzy_inference(ped_count: i32, veh_count: i32) -> f64 {
-    /* We don't use import but*/ use crate::membership_fns::{ped_low, ped_mid, ped_high, veh_low, veh_mid, veh_high, knowledge_base};
+    /* We don't use import but*/ use crate::traffic::membership_fns::{ped_low, ped_mid, ped_high, veh_low, veh_mid, veh_high, knowledge_base};
     // IDE said NAVIGATE TO DUPLICATE here, but this is exactly what Tails doing
     // We call it function because we could utilize the same thing multiple times
     // Pass function as a parameter into a function is brainstorming, but I could consider it efficient and elegant
