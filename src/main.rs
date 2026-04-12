@@ -1,8 +1,3 @@
-mod config;
-mod http;
-mod sim;
-mod traffic;
-
 fn main() {
-    sim::traffic_light_sim::run();
+    traffic_light_control::sim::traffic_light_sim::run();
 }
