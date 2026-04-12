@@ -1,5 +1,5 @@
 mod call_py_yolo;
-mod fuzzy_inference;
+pub mod fuzzy_inference;
 mod membership_fns;
 mod sql_ops;
 pub(crate) mod traffic_light;
