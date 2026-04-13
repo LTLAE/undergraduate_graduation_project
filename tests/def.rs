@@ -10,12 +10,17 @@ use traffic_light_control::config;
 use traffic_light_control::traffic::fuzzy_inference;
 
 pub const SIMULATION_SECONDS: u32 = 15 * 60;
+pub const PEAK_DURATION_SECONDS: u32 = 15 * 60;
+pub const RECOVERY_SIMULATION_SECONDS: u32 = 60 * 60;
 pub const PEDESTRIAN_ARRIVAL_RATE: f64 = 4.2;
+pub const PEDESTRIAN_RECOVERY_ARRIVAL_RATE: f64 = 0.5;
 pub const VEHICLE_ARRIVAL_RATE: f64 = 0.35;
 pub const PEDESTRIAN_SERVICE_RATE: f64 = 5.2;
 pub const VEHICLE_SERVICE_RATE: f64 = 0.5 * 3.0;
 pub const VEHICLE_STARTUP_LOSS_SECONDS: u32 = 2;
-pub const DEFAULT_SEED: u64 = 20260412;
+pub const STABILITY_QUEUE_THRESHOLD: u32 = 10;
+pub const STABILITY_CONSECUTIVE_SECONDS: u32 = 5 * 60;
+pub const DEFAULT_SEED: u64 = 114514;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SimulationParams {
@@ -41,6 +46,35 @@ impl Default for SimulationParams {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct ArrivalProfile {
+    pub peak_duration_seconds: u32,
+    pub pedestrian_peak_rate: f64,
+    pub pedestrian_recovery_rate: f64,
+    pub vehicle_rate: f64,
+}
+
+impl Default for ArrivalProfile {
+    fn default() -> Self {
+        Self {
+            peak_duration_seconds: PEAK_DURATION_SECONDS,
+            pedestrian_peak_rate: PEDESTRIAN_ARRIVAL_RATE,
+            pedestrian_recovery_rate: PEDESTRIAN_ARRIVAL_RATE,
+            vehicle_rate: VEHICLE_ARRIVAL_RATE,
+        }
+    }
+}
+
+impl ArrivalProfile {
+    fn pedestrian_rate_at(&self, second: u32) -> f64 {
+        if second < self.peak_duration_seconds {
+            self.pedestrian_peak_rate
+        } else {
+            self.pedestrian_recovery_rate
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub enum ControllerKind {
     Fixed,
     Fuzzy,
@@ -55,6 +89,7 @@ impl fmt::Display for ControllerKind {
     }
 }
 
+// Phases, with AI
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     PedestrianGreen,
@@ -85,6 +120,7 @@ pub struct CsvRow {
     pub second: u32,
     pub cycle: u32,
     pub phase: &'static str,
+    pub ped_arrival_rate: f64,
     pub ped_arrivals: u32,
     pub ped_departures: u32,
     pub ped_queue: u32,
@@ -100,6 +136,9 @@ pub struct SimulationSummary {
     pub total_seconds: u32,
     pub pedestrian_green_seconds: u32,
     pub vehicle_green_seconds: u32,
+    pub pedestrian_peak_rate: f64,
+    pub pedestrian_recovery_rate: f64,
+    pub peak_duration_seconds: u32,
     pub total_ped_arrivals: u32,
     pub total_ped_departures: u32,
     pub total_vehicle_arrivals: u32,
@@ -112,6 +151,8 @@ pub struct SimulationSummary {
     pub max_vehicle_queue: u32,
     pub final_ped_queue: u32,
     pub final_vehicle_queue: u32,
+    pub peak_end_ped_queue: u32,
+    pub stabilization_time_seconds: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +165,7 @@ pub struct SimulationResult {
 struct EngineState {
     controller: ControllerKind,
     params: SimulationParams,
+    arrival_profile: ArrivalProfile,
     rng: StdRng,
     ped_queue: u32,
     veh_queue: u32,
@@ -142,14 +184,23 @@ struct EngineState {
     total_vehicle_queue_seconds: f64,
     max_ped_queue: u32,
     max_vehicle_queue: u32,
+    peak_end_ped_queue: Option<u32>,
+    stable_run_seconds: u32,
+    stabilization_time_seconds: Option<u32>,
 }
 
 impl EngineState {
-    fn new(controller: ControllerKind, params: SimulationParams, seed: u64) -> Self {
+    fn new(
+        controller: ControllerKind,
+        params: SimulationParams,
+        arrival_profile: ArrivalProfile,
+        seed: u64,
+    ) -> Self {
         let current_ped_extension = compute_ped_extension(controller, 0, 0);
         Self {
             controller,
             params,
+            arrival_profile,
             rng: StdRng::seed_from_u64(seed),
             ped_queue: 0,
             veh_queue: 0,
@@ -168,12 +219,16 @@ impl EngineState {
             total_vehicle_queue_seconds: 0.0,
             max_ped_queue: 0,
             max_vehicle_queue: 0,
+            peak_end_ped_queue: None,
+            stable_run_seconds: 0,
+            stabilization_time_seconds: None,
         }
     }
 
     fn step(&mut self, second: u32) -> CsvRow {
-        let ped_arrivals = sample_poisson(&mut self.rng, PEDESTRIAN_ARRIVAL_RATE);
-        let veh_arrivals = sample_poisson(&mut self.rng, VEHICLE_ARRIVAL_RATE);
+        let ped_arrival_rate = self.arrival_profile.pedestrian_rate_at(second);
+        let ped_arrivals = sample_poisson(&mut self.rng, ped_arrival_rate);
+        let veh_arrivals = sample_poisson(&mut self.rng, self.arrival_profile.vehicle_rate);
 
         self.ped_queue += ped_arrivals;
         self.veh_queue += veh_arrivals;
@@ -197,6 +252,7 @@ impl EngineState {
             second,
             cycle: self.cycle_index,
             phase: self.phase.as_str(),
+            ped_arrival_rate,
             ped_arrivals,
             ped_departures,
             ped_queue: self.ped_queue,
@@ -206,8 +262,31 @@ impl EngineState {
             ped_extension_seconds: self.current_ped_extension,
         };
 
+        self.update_recovery_metrics(second);
         self.advance_phase();
         row
+    }
+
+    fn update_recovery_metrics(&mut self, second: u32) {
+        if second + 1 == self.arrival_profile.peak_duration_seconds {
+            self.peak_end_ped_queue = Some(self.ped_queue);
+        }
+
+        if second < self.arrival_profile.peak_duration_seconds
+            || self.stabilization_time_seconds.is_some()
+        {
+            return;
+        }
+
+        if self.ped_queue <= STABILITY_QUEUE_THRESHOLD {
+            self.stable_run_seconds += 1;
+            if self.stable_run_seconds >= STABILITY_CONSECUTIVE_SECONDS {
+                self.stabilization_time_seconds =
+                    Some(second + 1 - self.arrival_profile.peak_duration_seconds);
+            }
+        } else {
+            self.stable_run_seconds = 0;
+        }
     }
 
     fn phase_capacity(&self) -> (f64, f64) {
@@ -329,7 +408,23 @@ pub fn run_simulation(
     seed: u64,
     total_seconds: u32,
 ) -> SimulationResult {
-    let mut state = EngineState::new(controller, params, seed);
+    run_simulation_with_profile(
+        controller,
+        params,
+        ArrivalProfile::default(),
+        seed,
+        total_seconds,
+    )
+}
+
+pub fn run_simulation_with_profile(
+    controller: ControllerKind,
+    params: SimulationParams,
+    arrival_profile: ArrivalProfile,
+    seed: u64,
+    total_seconds: u32,
+) -> SimulationResult {
+    let mut state = EngineState::new(controller, params, arrival_profile, seed);
     let mut rows = Vec::with_capacity(total_seconds as usize);
 
     for second in 0..total_seconds {
@@ -341,6 +436,9 @@ pub fn run_simulation(
         total_seconds,
         pedestrian_green_seconds: params.pedestrian_green_seconds,
         vehicle_green_seconds: params.vehicle_green_seconds,
+        pedestrian_peak_rate: arrival_profile.pedestrian_peak_rate,
+        pedestrian_recovery_rate: arrival_profile.pedestrian_recovery_rate,
+        peak_duration_seconds: arrival_profile.peak_duration_seconds,
         total_ped_arrivals: state.total_ped_arrivals,
         total_ped_departures: state.total_ped_departures,
         total_vehicle_arrivals: state.total_vehicle_arrivals,
@@ -361,13 +459,15 @@ pub fn run_simulation(
         max_vehicle_queue: state.max_vehicle_queue,
         final_ped_queue: state.ped_queue,
         final_vehicle_queue: state.veh_queue,
+        peak_end_ped_queue: state.peak_end_ped_queue.unwrap_or(state.ped_queue),
+        stabilization_time_seconds: state.stabilization_time_seconds,
     };
 
     SimulationResult { summary, rows }
 }
 
 pub fn write_csv(result: &SimulationResult, file_name: &str) -> std::io::Result<PathBuf> {
-    let output_dir = Path::new("target").join("simulation_results");
+    let output_dir = Path::new("tests").join("simulation_results");
     fs::create_dir_all(&output_dir)?;
 
     let output_path = output_dir.join(file_name);
@@ -376,16 +476,17 @@ pub fn write_csv(result: &SimulationResult, file_name: &str) -> std::io::Result<
 
     writeln!(
         writer,
-        "second,cycle,phase,ped_arrivals,ped_departures,ped_queue,veh_arrivals,veh_departures,veh_queue,ped_extension_seconds"
+        "second,cycle,phase,ped_arrival_rate,ped_arrivals,ped_departures,ped_queue,veh_arrivals,veh_departures,veh_queue,ped_extension_seconds"
     )?;
 
     for row in &result.rows {
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{:.4},{},{},{},{},{},{},{}",
             row.second,
             row.cycle,
             row.phase,
+            row.ped_arrival_rate,
             row.ped_arrivals,
             row.ped_departures,
             row.ped_queue,
@@ -404,7 +505,7 @@ pub fn write_surface_csv(
     summaries: &[SimulationSummary],
     file_name: &str,
 ) -> std::io::Result<PathBuf> {
-    let output_dir = Path::new("target").join("simulation_results");
+    let output_dir = Path::new("tests").join("simulation_results");
     fs::create_dir_all(&output_dir)?;
 
     let output_path = output_dir.join(file_name);
@@ -413,16 +514,19 @@ pub fn write_surface_csv(
 
     writeln!(
         writer,
-        "controller,pedestrian_green_seconds,vehicle_green_seconds,total_seconds,total_ped_arrivals,total_ped_departures,total_vehicle_arrivals,total_vehicle_departures,avg_ped_queue,avg_vehicle_queue,avg_ped_wait_seconds,avg_vehicle_wait_seconds,max_ped_queue,max_vehicle_queue,final_ped_queue,final_vehicle_queue"
+        "controller,pedestrian_green_seconds,vehicle_green_seconds,pedestrian_peak_rate,pedestrian_recovery_rate,peak_duration_seconds,total_seconds,total_ped_arrivals,total_ped_departures,total_vehicle_arrivals,total_vehicle_departures,avg_ped_queue,avg_vehicle_queue,avg_ped_wait_seconds,avg_vehicle_wait_seconds,max_ped_queue,max_vehicle_queue,final_ped_queue,final_vehicle_queue,peak_end_ped_queue,stabilization_time_seconds"
     )?;
 
     for summary in summaries {
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{}",
+            "{},{},{},{:.4},{:.4},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{}",
             summary.controller,
             summary.pedestrian_green_seconds,
             summary.vehicle_green_seconds,
+            summary.pedestrian_peak_rate,
+            summary.pedestrian_recovery_rate,
+            summary.peak_duration_seconds,
             summary.total_seconds,
             summary.total_ped_arrivals,
             summary.total_ped_departures,
@@ -435,7 +539,12 @@ pub fn write_surface_csv(
             summary.max_ped_queue,
             summary.max_vehicle_queue,
             summary.final_ped_queue,
-            summary.final_vehicle_queue
+            summary.final_vehicle_queue,
+            summary.peak_end_ped_queue,
+            summary
+                .stabilization_time_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_default()
         )?;
     }
 
@@ -445,7 +554,7 @@ pub fn write_surface_csv(
 
 pub fn print_summary(summary: &SimulationSummary, csv_path: &Path) {
     println!(
-        "\ncontroller={}\nped_green={}s, veh_green={}s\ncsv={}\nped_arrivals={}, ped_departures={}, avg_ped_queue={:.2}, avg_ped_wait={:.2}s, max_ped_queue={}, final_ped_queue={}\nveh_arrivals={}, veh_departures={}, avg_veh_queue={:.2}, avg_veh_wait={:.2}s, max_veh_queue={}, final_veh_queue={}",
+        "\ncontroller={}\nped_green={}s, veh_green={}s\ncsv={}\nped_arrivals={}, ped_departures={}, avg_ped_queue={:.2}, avg_ped_wait={:.2}s, max_ped_queue={}, final_ped_queue={}\nveh_arrivals={}, veh_departures={}, avg_veh_queue={:.2}, avg_veh_wait={:.2}s, max_veh_queue={}, final_veh_queue={}\npeak_end_ped_queue={}, stabilization_time={}s",
         summary.controller,
         summary.pedestrian_green_seconds,
         summary.vehicle_green_seconds,
@@ -461,6 +570,11 @@ pub fn print_summary(summary: &SimulationSummary, csv_path: &Path) {
         summary.avg_vehicle_queue,
         summary.avg_vehicle_wait_seconds,
         summary.max_vehicle_queue,
-        summary.final_vehicle_queue
+        summary.final_vehicle_queue,
+        summary.peak_end_ped_queue,
+        summary
+            .stabilization_time_seconds
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "not_reached".to_string())
     );
 }
