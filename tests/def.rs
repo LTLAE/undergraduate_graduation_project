@@ -14,11 +14,13 @@ pub const PEAK_DURATION_SECONDS: u32 = 15 * 60;
 pub const RECOVERY_SIMULATION_SECONDS: u32 = 60 * 60;
 pub const PEDESTRIAN_ARRIVAL_RATE: f64 = 140.0 / 60.0;  // According to paper, 140 ped / min -> ped / s
 pub const PEDESTRIAN_RECOVERY_ARRIVAL_RATE: f64 = 0.5;
-pub const VEHICLE_ARRIVAL_RATE: f64 = 0.35;
 pub const PEDESTRIAN_SERVICE_RATE: f64 = 5.2;
-pub const VEHICLE_SERVICE_RATE_PER_LANE: f64 = 0.5; // per lane
+pub const VEHICLE_ARRIVAL_RATE_TOTAL: f64 = 0.35;   // total, /3 for per lane
+pub const VEHICLE_ARRIVAL_RATE_PER_LANE: f64 = VEHICLE_ARRIVAL_RATE_TOTAL / VEHICLE_LANE_COUNT as f64;
+// Vehicle service rate is defined per lane.
 pub const VEHICLE_LANE_COUNT: u32 = 3;
-pub const VEHICLE_SERVICE_RATE: f64 = VEHICLE_SERVICE_RATE_PER_LANE * VEHICLE_LANE_COUNT as f64;    // so in the junction, we have a service rate of 1.5
+pub const VEHICLE_SERVICE_RATE_PER_LANE: f64 = 0.5;
+pub const VEHICLE_SERVICE_RATE: f64 = VEHICLE_SERVICE_RATE_PER_LANE * VEHICLE_LANE_COUNT as f64;
 pub const VEHICLE_STARTUP_LOSS_SECONDS: u32 = 2;
 pub const STABILITY_QUEUE_THRESHOLD: u32 = 10;
 pub const STABILITY_CONSECUTIVE_SECONDS: u32 = 5 * 60;
@@ -61,7 +63,7 @@ impl Default for ArrivalProfile {
             peak_duration_seconds: PEAK_DURATION_SECONDS,
             pedestrian_peak_rate: PEDESTRIAN_ARRIVAL_RATE,
             pedestrian_recovery_rate: PEDESTRIAN_ARRIVAL_RATE,
-            vehicle_rate: VEHICLE_ARRIVAL_RATE,
+            vehicle_rate: VEHICLE_ARRIVAL_RATE_TOTAL,
         }
     }
 }
