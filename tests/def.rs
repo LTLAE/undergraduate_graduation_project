@@ -10,13 +10,15 @@ use traffic_light_control::config;
 use traffic_light_control::traffic::fuzzy_inference;
 
 pub const SIMULATION_SECONDS: u32 = 15 * 60;
+pub const PEAK_PLOT_SECONDS: u32 = 20 * 60;
 pub const PEAK_DURATION_SECONDS: u32 = 15 * 60;
 pub const RECOVERY_SIMULATION_SECONDS: u32 = 60 * 60;
-pub const PEDESTRIAN_ARRIVAL_RATE: f64 = 140.0 / 60.0;  // According to paper, 140 ped / min -> ped / s
+pub const PEDESTRIAN_ARRIVAL_RATE: f64 = 140.0 / 60.0; // According to paper, 140 ped / min -> ped / s
 pub const PEDESTRIAN_RECOVERY_ARRIVAL_RATE: f64 = 0.5;
 pub const PEDESTRIAN_SERVICE_RATE: f64 = 5.2;
-pub const VEHICLE_ARRIVAL_RATE_TOTAL: f64 = 0.35;   // total, /3 for per lane
-pub const VEHICLE_ARRIVAL_RATE_PER_LANE: f64 = VEHICLE_ARRIVAL_RATE_TOTAL / VEHICLE_LANE_COUNT as f64;
+pub const VEHICLE_ARRIVAL_RATE_TOTAL: f64 = 0.17; // total, /3 for per lane, roughly 10 veh / min total
+pub const VEHICLE_ARRIVAL_RATE_PER_LANE: f64 =
+    VEHICLE_ARRIVAL_RATE_TOTAL / VEHICLE_LANE_COUNT as f64;
 // Vehicle service rate is defined per lane.
 pub const VEHICLE_LANE_COUNT: u32 = 3;
 pub const VEHICLE_SERVICE_RATE_PER_LANE: f64 = 0.5;

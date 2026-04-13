@@ -2,8 +2,8 @@ mod def;
 
 use def::{
     print_summary, run_simulation, run_simulation_with_profile, write_csv, ArrivalProfile,
-    ControllerKind, SimulationParams, DEFAULT_SEED, PEDESTRIAN_RECOVERY_ARRIVAL_RATE,
-    RECOVERY_SIMULATION_SECONDS, SIMULATION_SECONDS,
+    ControllerKind, SimulationParams, DEFAULT_SEED, PEAK_PLOT_SECONDS,
+    PEDESTRIAN_RECOVERY_ARRIVAL_RATE, RECOVERY_SIMULATION_SECONDS, SIMULATION_SECONDS,
 };
 
 #[test]
@@ -19,6 +19,27 @@ fn export_fuzzy_phase_csv() {
 
     assert!(!result.rows.is_empty(), "fuzzy simulation produced no rows");
     assert!(csv_path.exists(), "fuzzy csv was not created");
+
+    print_summary(&result.summary, &csv_path);
+}
+
+#[test]
+fn export_fuzzy_peak_20min_csv() {
+    let params = SimulationParams::default();
+    let result = run_simulation(
+        ControllerKind::Fuzzy,
+        params,
+        DEFAULT_SEED,
+        PEAK_PLOT_SECONDS,
+    );
+    let csv_path =
+        write_csv(&result, "fuzzy_peak_20min.csv").expect("failed to write fuzzy 20min csv");
+
+    assert!(
+        !result.rows.is_empty(),
+        "fuzzy 20min simulation produced no rows"
+    );
+    assert!(csv_path.exists(), "fuzzy 20min csv was not created");
 
     print_summary(&result.summary, &csv_path);
 }
