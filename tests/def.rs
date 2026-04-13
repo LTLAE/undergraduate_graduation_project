@@ -327,7 +327,10 @@ impl EngineState {
         let serviceable = bank.floor() as u32;
         let departures = (*queue).min(serviceable);
         *queue -= departures;
-        *bank -= departures as f64;
+        *bank -= serviceable as f64;
+        if *bank < 0.0 {
+            *bank = 0.0;
+        }
         *total_departures += departures;
         departures
     }
