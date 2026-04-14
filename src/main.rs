@@ -30,8 +30,9 @@ fn run_all_simulations_and_plots() -> Result<(), String> {
 
     println!("Rendering gnuplot figures...");
     for script in [
+        "gnuplot/peak_20min_fixed_heatmaps.gp",
+        "gnuplot/peak_20min_fixed_vs_fuzzy_tradeoff.gp",
         "gnuplot/peak_20min_queue_lines.gp",
-        "gnuplot/peak_20min_ped_queue_surface.gp",
         "gnuplot/recovery_queue_lines.gp",
     ] {
         run_command(&project_root, "gnuplot", &[script])?;
@@ -39,7 +40,7 @@ fn run_all_simulations_and_plots() -> Result<(), String> {
 
     println!("\nCompleted simulation export and plot generation.");
     println!(
-        "CSV and PNG files are available under {}",
+        "Primary CSV and PNG files are available under {}",
         project_root.join("tests/simulation_results").display()
     );
 
