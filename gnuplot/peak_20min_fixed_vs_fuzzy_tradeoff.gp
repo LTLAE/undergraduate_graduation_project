@@ -21,6 +21,11 @@ set label 1 sprintf("Fuzzy avg queues\nPed = %.2f\nVeh = %.2f", fuzzy_ped, fuzzy
     front left \
     tc rgb "#222222"
 
+# plot \
+#     data_dir . "/fixed_peak_20min_surface.csv" using 13:12 with points pt 7 ps 0.6 lc rgb "#9aa0a6" title "Fixed-time combinations", \
+#     '+' using (fuzzy_veh):(fuzzy_ped) with points pt 5 ps 3 lc rgb "#d62728" title "Fuzzy control"
+
+# plot with purple
 plot \
-    data_dir . "/fixed_peak_20min_surface.csv" using 13:12 with points pt 7 ps 0.6 lc rgb "#9aa0a6" title "Fixed-time combinations", \
-    '+' using (fuzzy_veh):(fuzzy_ped) with points pt 5 ps 3 lc rgb "#d62728" title "Fuzzy control"
+    data_dir . "/fixed_peak_20min_surface.csv" using 13:12 with points pt 7 ps 0.8 lc rgb "#f3a9ff" title "Fixed-time combinations", \
+    '+' using (fuzzy_veh):(fuzzy_ped) with points pt 7 ps 3 lc rgb "#cb59ff" title "Fuzzy control"

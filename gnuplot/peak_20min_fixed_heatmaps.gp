@@ -17,6 +17,11 @@ set xtics 15,5,60
 set ytics 15,5,60
 set grid front
 
+set palette defined (0 '#5BCEFA', 0.5 '#FFFFFF', 1 '#F5A9B8')     # pink-white-blue
+# set palette defined (0 '#2C2C2C', 0.33 '#9C59D1', 0.66 '#FFFFFF', 1 '#FCF434')      # yellow-white-purple-black
+# but the fuck someone told me this look likes Kobe Bryant
+# ABSOLUTELYTRUEDUDE -- xqc
+
 set title "Average Pedestrian Queue Length"
 set cblabel "Pedestrian Queue"
 plot data_dir . "/fixed_peak_20min_surface.csv" using 3:2:12 with image notitle
