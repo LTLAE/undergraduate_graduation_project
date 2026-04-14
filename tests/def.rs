@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use traffic_light_control::config;
 use traffic_light_control::traffic::fuzzy_inference;
 
-pub const SIMULATION_SECONDS: u32 = 15 * 60;
+pub const SIMULATION_SECONDS: u32 = 20 * 60;
 pub const PEAK_PLOT_SECONDS: u32 = 20 * 60;
-pub const PEAK_DURATION_SECONDS: u32 = 15 * 60;
+pub const PEAK_DURATION_SECONDS: u32 = 20 * 60;
 pub const RECOVERY_SIMULATION_SECONDS: u32 = 60 * 60;
 pub const PEDESTRIAN_ARRIVAL_RATE: f64 = 140.0 / 60.0; // According to paper, 140 ped / min -> ped / s
 pub const PEDESTRIAN_RECOVERY_ARRIVAL_RATE: f64 = 0.5;
