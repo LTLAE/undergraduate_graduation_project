@@ -7,7 +7,10 @@ use std::time::Duration;
 use eframe::egui;
 use egui::{Color32, Pos2, Stroke, Vec2, Rect};
 use crate::config;
-use crate::http::public_entry::{calculate_extension_time, detect_cars, detect_people};
+use crate::http::public_entry::{
+    calculate_extension_time, detect_cars, detect_people, init_history_store,
+    record_pedestrian_count, record_vehicle_count,
+};
 use crate::traffic::{LightState, TrafficLight, TrafficLightPosition, TrafficSign};
 use std::path::Path;
 
@@ -738,6 +741,9 @@ struct TrafficLightApp {
 impl TrafficLightApp {
     fn new(state: Arc<Mutex<SimState>>) -> Self {
         let camera_devices = crate::sim::camera::get_camera_devices();
+        let yolo_msg = init_history_store(config::INIT_SQL_FILE_LOCATION)
+            .err()
+            .map(|e| format!("Database init failed: {}", e));
         Self {
             state,
             ui_ped_text: String::new(),
@@ -746,7 +752,7 @@ impl TrafficLightApp {
             ped_err: None,
             ped_img_path: None,
             veh_img_path: None,
-            yolo_msg: None,
+            yolo_msg,
             camera_devices,
             selected_camera: 0,
             camera_img_path: None,
@@ -1152,8 +1158,11 @@ impl eframe::App for TrafficLightApp {
                                                     Some(p) => match detect_people(&p) {
                                                         Ok(cnt) => {
                                                             self.ui_ped_text = cnt.to_string();
-                                                            self.yolo_msg = Some(format!("Pedestrians detected: {}", cnt));
                                                             self.ped_err = None;
+                                                            self.yolo_msg = Some(match record_pedestrian_count(cnt) {
+                                                                Ok(()) => format!("Pedestrians detected: {}. Saved to database.", cnt),
+                                                                Err(e) => format!("Pedestrians detected: {}, but database write failed: {}", cnt, e),
+                                                            });
                                                         }
                                                         Err(e) => {
                                                             self.yolo_msg = Some(format!("Pedestrian detection failed: {}", e));
@@ -1185,7 +1194,10 @@ impl eframe::App for TrafficLightApp {
                                                     Some(p) => match detect_cars(&p) {
                                                         Ok(cnt) => {
                                                             self.ui_veh_text = cnt.to_string();
-                                                            self.yolo_msg = Some(format!("Vehicles detected: {}", cnt));
+                                                            self.yolo_msg = Some(match record_vehicle_count(cnt) {
+                                                                Ok(()) => format!("Vehicles detected: {}. Saved to database.", cnt),
+                                                                Err(e) => format!("Vehicles detected: {}, but database write failed: {}", cnt, e),
+                                                            });
                                                         }
                                                         Err(e) => {
                                                             self.yolo_msg = Some(format!("Vehicle detection failed: {}", e));

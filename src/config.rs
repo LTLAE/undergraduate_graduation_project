@@ -19,6 +19,7 @@ pub const CURRENT_EXTEND_TIME_WEIGHT: f64 = 0.6;    // 0.6 current 0.4 historica
 
 // Database configuration
 pub const SQL_FILE_LOCATION: &str = "./sqheavy/db.sqlite";
+pub const INIT_SQL_FILE_LOCATION: &str = "./sqheavy/init.sql";
 
 // Python and ML model configuration
 pub const PYTHON_VENV_SITE_PACKAGES: &str = "python/.venv/lib/python3.9/site-packages";
